@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Karatani Kojin Works</title>
+  <style>
+    body { font-family: sans-serif; }
+    table { border-collapse: collapse; width: 100%; }
+    th, td { border: 1px solid #ddd; padding: 8px; white-space: pre-wrap; }
+    th { background-color: #f2f2f2; text-align: left; }
+  </style>
+</head>
+<body>
+  <h1>Karatani Kojin Works</h1>
+  <p>This table displays works by Karatani Kojin, based on a live SPARQL query to <a href="https://jpsearch.go.jp/">JPSearch</a>.</p>
+  <table id="results-table">
+    <thead>
+      <tr>
+        <!-- Headers will be populated by JS -->
+      </tr>
+    </thead>
+    <tbody>
+      <tr><td colspan="4">Loading...</td></tr>
+    </tbody>
+  </table>
+  <div id="error-container" style="display: none; color: red; background-color: #ffebeb; border: 1px solid red; padding: 10px; margin-top: 20px;">
+    <h2>JavaScript Error</h2>
+    <pre id="error-message"></pre>
+  </div>
+  <script>
+    window.onerror = function(message, source, lineno, colno, error) {
+      document.getElementById('error-container').style.display = 'block';
+      document.getElementById('error-message').textContent = 
+        `Message: ${message}\nSource: ${source}\nLine: ${lineno}, Column: ${colno}\nError: ${error}`;
+      return true; // Prevents the default browser error handling
+    };
+
+    const sparqlQuery = `
+SELECT
+min(?d) as ?published
+?o as ?title
+GROUP_CONCAT(?d; separator="\\n") as ?revisions
+group_concat(?s; separator="\\n") AS ?links
+WHERE {
+{
+select * where { ?s schema:creator <http://id.ndl.go.jp/auth/entity/00026849>; rdfs:label ?o; schema:datePublished ?d }
+order by ?d ?o
+}
+}
+#group by ?title
+order by ?revisions ?published ?title
+`;
+
+    const endpoint = 'https://jpsearch.go.jp/rdf/sparql';
+    const url = `${endpoint}?query=${encodeURIComponent(sparqlQuery)}&format=json`;
+
+    const tableHead = document.querySelector('#results-table thead tr');
+    const tableBody = document.querySelector('#results-table tbody');
+
+    fetch(url)
+      .then(res => {
+        if (!res.ok) {
+          throw new Error(`HTTP error! status: ${res.status}`);
+        }
+        return res.json();
+      })
+      .then(data => {
+        tableBody.innerHTML = ''; // Clear loading message
+        const vars = data.head.vars;
+        // Populate headers
+        vars.forEach(v => {
+          const th = document.createElement('th');
+          th.textContent = v;
+          tableHead.appendChild(th);
+        });
+
+        // Populate rows
+        const bindings = data.results.bindings;
+        if (bindings.length === 0) {
+            const row = document.createElement('tr');
+            const cell = document.createElement('td');
+            cell.textContent = 'No results found.';
+            cell.colSpan = vars.length;
+            row.appendChild(cell);
+            tableBody.appendChild(row);
+            return;
+        }
+
+        bindings.forEach(binding => {
+          const row = document.createElement('tr');
+          vars.forEach(v => {
+            const cell = document.createElement('td');
+            const value = binding[v] ? binding[v].value : '';
+            // Check if the value is a URL and make it a link
+	    // split value by newline for revisions and links
+	    if (v === 'revisions' || v === 'links') {
+	      const values = value.split('\n');
+	      const list = document.createElement('ul');
+	      values.forEach(val => {
+		const listItem = document.createElement('li');
+		if (val.startsWith('http')) {
+		  const a = document.createElement('a');
+		  a.href = val;
+		  a.textContent = val;
+		  a.target = '_blank'; // Open in new tab
+		  listItem.appendChild(a);
+		} else {
+		  listItem.textContent = val;
+		}
+		list.appendChild(listItem);
+	      });
+	      cell.appendChild(list);
+	    } else
+	    // If not revisions or links, just set the text content
+	    if (v === 'published') {
+		const date = new Date(value);
+		cell.textContent = date.toLocaleDateString('ja-JP', { year: 'numeric', month: '2-digit', day: '2-digit' });
+	    }
+	    // If it's a regular value, just set the text content
+            
+            if (value.startsWith('http')) {
+                //const a = document.createElement('a');
+                //a.href = value;
+                //a.textContent = value;
+                //a.target = '_blank'; // Open in new tab
+                //cell.appendChild(a);
+            } else {
+                cell.textContent = value;
+            }
+            row.appendChild(cell);
+          });
+          tableBody.appendChild(row);
+        });
+      })
+      .catch(e => {
+        console.error('Error fetching or parsing data:', e);
+        tableBody.innerHTML = `<tr><td colspan="4" style="text-align: center; color: red;">Error loading data: ${e.message}</td></tr>`;
+      });
+  </script>
+</body>
+</html>
