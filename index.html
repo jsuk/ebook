@@ -13,7 +13,7 @@
   <h1>Works by Author</h1>
   <label for="author-select">Select Author:</label>
   <select id="author-select">
-    <option value="http://id.ndl.go.jp/auth/entity/00026849" selected>Karatani Kojin</option>
+    <option value="http://id.ndl.go.jp/auth/entity/00026849">Karatani Kojin</option>
     <option value="http://id.ndl.go.jp/auth/entity/00138697">Chon Kyongmo</option>
     <option value="http://id.ndl.go.jp/auth/entity/00097630">Yoshimoto Takaaki</option>
     <option value="http://id.ndl.go.jp/auth/entity/001225192">Ryu Shimin</option>
@@ -125,15 +125,29 @@
     async function loadCachedAuthors() {
       try {
         await openDb();
+
+        // Ensure initial HTML options are in IndexedDB
+        const initialOptions = Array.from(authorSelect.options);
+        for (const option of initialOptions) {
+          await addAuthorToDb({ id: option.value, name: option.textContent });
+        }
+
         const authors = await getAuthorsFromDb();
+
+        // Remove all existing options from the select element
+        while (authorSelect.firstChild) {
+            authorSelect.removeChild(authorSelect.firstChild);
+        }
+
+        // Add all authors from IndexedDB to the select element
+        // Prepend to ensure newly added (cached) authors appear at the top
         authors.forEach(author => {
-          if (!authorSelect.querySelector(`option[value="${author.id}"]`)) {
             const newOption = document.createElement('option');
             newOption.value = author.id;
             newOption.textContent = author.name;
-            authorSelect.appendChild(newOption);
-          }
+            authorSelect.prepend(newOption);
         });
+
         console.log('Cached authors loaded. Cache Schema Version:', CACHE_SCHEMA_VERSION);
       } catch (error) {
         console.error('Failed to load cached authors:', error);
@@ -141,7 +155,13 @@
     }
 
     // Call this on page load
-    loadCachedAuthors();
+    loadCachedAuthors().then(() => {
+      const lastSelectedAuthor = localStorage.getItem('lastSelectedAuthor');
+      if (lastSelectedAuthor) {
+        authorSelect.value = lastSelectedAuthor;
+      }
+      fetchWorks(authorSelect.value);
+    });
 
     // Add initial authors to IndexedDB
     Array.from(authorSelect.options).forEach(option => {
@@ -295,12 +315,12 @@ order by ?revisions ?published ?title
         });
     }
 
-    // Initial load
-    fetchWorks(authorSelect.value);
+    
 
     // Add event listener for author selection change
     authorSelect.addEventListener('change', (event) => {
       fetchWorks(event.target.value);
+      localStorage.setItem('lastSelectedAuthor', event.target.value);
     });
 
     const authorSearchInput = document.getElementById('author-search-input');
@@ -381,7 +401,7 @@ LIMIT 100
                 const newOption = document.createElement('option');
                 newOption.value = authorId;
                 newOption.textContent = authorName;
-                authorSelect.appendChild(newOption);
+                authorSelect.prepend(newOption);
                 authorSelect.value = authorId;
                 addAuthorToDb({ id: authorId, name: authorName });
               }
