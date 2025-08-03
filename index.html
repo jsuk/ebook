@@ -25,6 +25,7 @@
   <label for="author-search-input">Author Name:</label>
   <input type="text" id="author-search-input" placeholder="Enter author name">
   <button id="search-author-button">Search</button>
+  <button id="clear-cache-button">Clear Cached Authors</button>
   <div id="author-search-results"></div>
   <p>This table displays works by the selected author, based on a live SPARQL query to <a href="https://jpsearch.go.jp/">JPSearch</a>.</p>
   <table id="results-table">
@@ -145,6 +146,33 @@
     // Add initial authors to IndexedDB
     Array.from(authorSelect.options).forEach(option => {
       addAuthorToDb({ id: option.value, name: option.textContent });
+    });
+
+    function clearAllAuthorsFromDb() {
+      return new Promise((resolve, reject) => {
+        const transaction = db.transaction([STORE_NAME], 'readwrite');
+        const store = transaction.objectStore(STORE_NAME);
+        const request = store.clear();
+
+        request.onsuccess = () => {
+          console.log('All authors cleared from IndexedDB.');
+          resolve();
+        };
+
+        request.onerror = (event) => {
+          console.error('Error clearing authors from DB:', event.target.errorCode);
+          reject(event.target.errorCode);
+        };
+      });
+    }
+
+    const clearCacheButton = document.getElementById('clear-cache-button');
+    clearCacheButton.addEventListener('click', async () => {
+      if (confirm('Are you sure you want to clear all cached author data?')) {
+        await clearAllAuthorsFromDb();
+        // Optionally, reload the page or re-populate the select with only initial authors
+        location.reload(); 
+      }
     });
 
     function fetchWorks(authorId) {
