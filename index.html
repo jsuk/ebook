@@ -198,10 +198,18 @@ order by ?revisions ?published ?title
       const sparqlQuery = `
 PREFIX foaf: <http://xmlns.com/foaf/0.1/>
 PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
-SELECT ?s ?name
+PREFIX schema: <http://schema.org/>
+PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+PREFIX xl: <http://www.w3.org/2008/05/skos-xl#>
+
+SELECT ?s ?name ?label ?birthDate ?deathDate
 WHERE {
   ?s rdf:type foaf:Person;
+     ^foaf:primaryTopic ?ndlna;
      foaf:name ?name.
+  OPTIONAL { ?s schema:dateOfBirth ?birthDate. }
+  OPTIONAL { ?s schema:dateOfDeath ?deathDate. }
+  OPTIONAL { ?ndlna rdfs:label ?label. }
   FILTER regex(?name, "${name}", "i")
 }
 LIMIT 100
@@ -220,7 +228,7 @@ LIMIT 100
         })
         .then(data => {
           authorSearchResults.innerHTML = '';
-          const bindings = data.results.bindings;
+          const bindings = data.results && data.results.bindings ? data.results.bindings : [];
           if (bindings.length === 0) {
             authorSearchResults.innerHTML = 'No authors found.';
             return;
@@ -230,10 +238,12 @@ LIMIT 100
           bindings.forEach(binding => {
             const li = document.createElement('li');
             const authorId = binding.s.value;
-            const authorName = binding.name.value;
+            const authorName = binding.label.value || binding.name.value;
+            const birthDate = binding.birthDate ? ` (${binding.birthDate.value})` : '';
+            const deathDate = binding.deathDate ? ` - ${binding.deathDate.value}` : '';
             const a = document.createElement('a');
             a.href = '#';
-            a.textContent = authorName;
+            a.textContent = `${authorName}${birthDate}${deathDate}`;
             a.addEventListener('click', (e) => {
               e.preventDefault();
               fetchWorks(authorId);
