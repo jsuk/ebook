@@ -16,7 +16,14 @@
     <option value="http://id.ndl.go.jp/auth/entity/00026849" selected>Karatani Kojin</option>
     <option value="http://id.ndl.go.jp/auth/entity/00138697">Chon Kyongmo</option>
     <option value="http://id.ndl.go.jp/auth/entity/00097630">Yoshimoto Takaaki</option>
+    <option value="http://id.ndl.go.jp/auth/entity/001225192">Ryu Shimin</option>
   </select>
+
+  <h2>Search Authors</h2>
+  <label for="author-search-input">Author Name:</label>
+  <input type="text" id="author-search-input" placeholder="Enter author name">
+  <button id="search-author-button">Search</button>
+  <div id="author-search-results"></div>
   <p>This table displays works by the selected author, based on a live SPARQL query to <a href="https://jpsearch.go.jp/">JPSearch</a>.</p>
   <table id="results-table">
     <thead>
@@ -40,7 +47,8 @@
       return true; // Prevents the default browser error handling
     };
 
-    const endpoint = 'https://jpsearch.go.jp/rdf/sparql';
+    const jpsEndpoint = 'https://jpsearch.go.jp/rdf/sparql';
+    const ndlEndpoint = 'https://id.ndl.go.jp/auth/ndla/sparql';
     const tableHead = document.querySelector('#results-table thead tr');
     const tableBody = document.querySelector('#results-table tbody');
     const authorSelect = document.getElementById('author-select');
@@ -78,7 +86,7 @@ order by ?d ?o
 order by ?revisions ?published ?title
 `;
 
-      const url = `${endpoint}?query=${encodeURIComponent(sparqlQuery)}&format=json`;
+      const url = `${jpsEndpoint}?query=${encodeURIComponent(sparqlQuery)}&format=json`;
 
       // Clear previous results and show loading message
       tableHead.innerHTML = '';
@@ -172,6 +180,89 @@ order by ?revisions ?published ?title
     authorSelect.addEventListener('change', (event) => {
       fetchWorks(event.target.value);
     });
+
+    const authorSearchInput = document.getElementById('author-search-input');
+    const searchAuthorButton = document.getElementById('search-author-button');
+    const authorSearchResults = document.getElementById('author-search-results');
+
+    searchAuthorButton.addEventListener('click', () => {
+      const authorName = authorSearchInput.value;
+      if (authorName) {
+        searchAuthors(authorName);
+      }
+    });
+
+    function searchAuthors(name) {
+      const sparqlQuery = `
+PREFIX foaf: <http://xmlns.com/foaf/0.1/>
+PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+SELECT ?s ?name
+WHERE {
+  ?s rdf:type foaf:Person;
+     foaf:name ?name.
+  FILTER regex(?name, "${name}", "i")
+}
+LIMIT 100
+`;
+
+      const url = `${ndlEndpoint}?query=${encodeURIComponent(sparqlQuery)}&format=json`;
+
+      authorSearchResults.innerHTML = 'Loading...';
+
+      fetch(url)
+        .then(res => {
+          if (!res.ok) {
+            throw new Error(`HTTP error! status: ${res.status}`);
+          }
+          return res.json();
+        })
+        .then(data => {
+          authorSearchResults.innerHTML = '';
+          const bindings = data.results.bindings;
+          if (bindings.length === 0) {
+            authorSearchResults.innerHTML = 'No authors found.';
+            return;
+          }
+
+          const ul = document.createElement('ul');
+          bindings.forEach(binding => {
+            const li = document.createElement('li');
+            const authorId = binding.s.value;
+            const authorName = binding.name.value;
+            const a = document.createElement('a');
+            a.href = '#';
+            a.textContent = authorName;
+            a.addEventListener('click', (e) => {
+              e.preventDefault();
+              fetchWorks(authorId);
+              // Optionally update the author select dropdown
+              // if a matching option exists or add a new one
+              let optionExists = false;
+              for (let i = 0; i < authorSelect.options.length; i++) {
+                if (authorSelect.options[i].value === authorId) {
+                  authorSelect.selectedIndex = i;
+                  optionExists = true;
+                  break;
+                }
+              }
+              if (!optionExists) {
+                const newOption = document.createElement('option');
+                newOption.value = authorId;
+                newOption.textContent = authorName;
+                authorSelect.appendChild(newOption);
+                authorSelect.value = authorId;
+              }
+            });
+            li.appendChild(a);
+            ul.appendChild(li);
+          });
+          authorSearchResults.appendChild(ul);
+        })
+        .catch(e => {
+          console.error('Error searching authors:', e);
+          authorSearchResults.innerHTML = `<span style="color: red;">Error searching authors: ${e.message}</span>`;
+        });
+    }
   </script>
 </body>
 </html>
