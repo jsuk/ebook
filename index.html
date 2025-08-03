@@ -55,6 +55,98 @@
     const tableBody = document.querySelector('#results-table tbody');
     const authorSelect = document.getElementById('author-select');
 
+    // IndexedDB setup
+    const DB_NAME = 'author_db';
+    const DB_VERSION = 1; // Increment this for schema changes
+    const STORE_NAME = 'authors';
+    const CACHE_SCHEMA_VERSION = '1.0'; // For debugging purposes
+
+    let db;
+
+    function openDb() {
+      return new Promise((resolve, reject) => {
+        const request = indexedDB.open(DB_NAME, DB_VERSION);
+
+        request.onupgradeneeded = (event) => {
+          db = event.target.result;
+          if (!db.objectStoreNames.contains(STORE_NAME)) {
+            db.createObjectStore(STORE_NAME, { keyPath: 'id' });
+          }
+        };
+
+        request.onsuccess = (event) => {
+          db = event.target.result;
+          console.log('IndexedDB opened successfully');
+          resolve(db);
+        };
+
+        request.onerror = (event) => {
+          console.error('IndexedDB error:', event.target.errorCode);
+          reject(event.target.errorCode);
+        };
+      });
+    }
+
+    function addAuthorToDb(author) {
+      return new Promise((resolve, reject) => {
+        const transaction = db.transaction([STORE_NAME], 'readwrite');
+        const store = transaction.objectStore(STORE_NAME);
+        const request = store.put(author); // Use put to add or update
+
+        request.onsuccess = () => {
+          resolve();
+        };
+
+        request.onerror = (event) => {
+          console.error('Error adding author to DB:', event.target.errorCode);
+          reject(event.target.errorCode);
+        };
+      });
+    }
+
+    function getAuthorsFromDb() {
+      return new Promise((resolve, reject) => {
+        const transaction = db.transaction([STORE_NAME], 'readonly');
+        const store = transaction.objectStore(STORE_NAME);
+        const request = store.getAll();
+
+        request.onsuccess = () => {
+          resolve(request.result);
+        };
+
+        request.onerror = (event) => {
+          console.error('Error getting authors from DB:', event.target.errorCode);
+          reject(event.target.errorCode);
+        };
+      });
+    }
+
+    async function loadCachedAuthors() {
+      try {
+        await openDb();
+        const authors = await getAuthorsFromDb();
+        authors.forEach(author => {
+          if (!authorSelect.querySelector(`option[value="${author.id}"]`)) {
+            const newOption = document.createElement('option');
+            newOption.value = author.id;
+            newOption.textContent = author.name;
+            authorSelect.appendChild(newOption);
+          }
+        });
+        console.log('Cached authors loaded. Cache Schema Version:', CACHE_SCHEMA_VERSION);
+      } catch (error) {
+        console.error('Failed to load cached authors:', error);
+      }
+    }
+
+    // Call this on page load
+    loadCachedAuthors();
+
+    // Add initial authors to IndexedDB
+    Array.from(authorSelect.options).forEach(option => {
+      addAuthorToDb({ id: option.value, name: option.textContent });
+    });
+
     function fetchWorks(authorId) {
       const sparqlQuery = `
 PREFIX chname: <https://jpsearch.go.jp/entity/chname/>
@@ -263,6 +355,7 @@ LIMIT 100
                 newOption.textContent = authorName;
                 authorSelect.appendChild(newOption);
                 authorSelect.value = authorId;
+                addAuthorToDb({ id: authorId, name: authorName });
               }
             });
             li.appendChild(a);
