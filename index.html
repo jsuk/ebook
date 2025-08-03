@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html>
 <head>
-  <title>Karatani Kojin Works</title>
+  <title>Book list</title>
   <style>
     body { font-family: sans-serif; }
     table { border-collapse: collapse; width: 100%; }
@@ -10,8 +10,14 @@
   </style>
 </head>
 <body>
-  <h1>Karatani Kojin Works</h1>
-  <p>This table displays works by Karatani Kojin, based on a live SPARQL query to <a href="https://jpsearch.go.jp/">JPSearch</a>.</p>
+  <h1>Works by Author</h1>
+  <label for="author-select">Select Author:</label>
+  <select id="author-select">
+    <option value="http://id.ndl.go.jp/auth/entity/00026849" selected>Karatani Kojin</option>
+    <option value="http://id.ndl.go.jp/auth/entity/00138697">Chon Kyongmo</option>
+    <option value="http://id.ndl.go.jp/auth/entity/00097630">Yoshimoto Takaaki</option>
+  </select>
+  <p>This table displays works by the selected author, based on a live SPARQL query to <a href="https://jpsearch.go.jp/">JPSearch</a>.</p>
   <table id="results-table">
     <thead>
       <tr>
@@ -34,7 +40,16 @@
       return true; // Prevents the default browser error handling
     };
 
-    const sparqlQuery = `
+    const endpoint = 'https://jpsearch.go.jp/rdf/sparql';
+    const tableHead = document.querySelector('#results-table thead tr');
+    const tableBody = document.querySelector('#results-table tbody');
+    const authorSelect = document.getElementById('author-select');
+
+    function fetchWorks(authorId) {
+      const sparqlQuery = `
+PREFIX chname: <https://jpsearch.go.jp/entity/chname/>
+PREFIX owl: <http://www.w3.org/2002/07/owl#>
+PREFIX schema: <http://schema.org/>
 SELECT
 min(?d) as ?published
 ?o as ?title
@@ -42,7 +57,20 @@ GROUP_CONCAT(?d; separator="\\n") as ?revisions
 group_concat(?s; separator="\\n") AS ?links
 WHERE {
 {
-select * where { ?s schema:creator <http://id.ndl.go.jp/auth/entity/00026849>; rdfs:label ?o; schema:datePublished ?d }
+select * where {
+     {
+      ?s ?p <${authorId}>;
+      rdfs:label ?o;
+      schema:datePublished ?d 
+     }
+     #union
+     #{
+     # <${authorId}> owl:sameAs ?auth.
+     # ?s schema:creator ?auth;
+     # rdfs:label ?o;
+     # schema:datePublished ?d 
+     #}
+}
 order by ?d ?o
 }
 }
@@ -50,19 +78,19 @@ order by ?d ?o
 order by ?revisions ?published ?title
 `;
 
-    const endpoint = 'https://jpsearch.go.jp/rdf/sparql';
-    const url = `${endpoint}?query=${encodeURIComponent(sparqlQuery)}&format=json`;
+      const url = `${endpoint}?query=${encodeURIComponent(sparqlQuery)}&format=json`;
 
-    const tableHead = document.querySelector('#results-table thead tr');
-    const tableBody = document.querySelector('#results-table tbody');
+      // Clear previous results and show loading message
+      tableHead.innerHTML = '';
+      tableBody.innerHTML = '<tr><td colspan="4">Loading...</td></tr>';
 
-    fetch(url)
-      .then(res => {
-        if (!res.ok) {
-          throw new Error(`HTTP error! status: ${res.status}`);
-        }
-        return res.json();
-      })
+      fetch(url)
+        .then(res => {
+          if (!res.ok) {
+            throw new Error(`HTTP error! status: ${res.status}`);
+          }
+          return res.json();
+        })
       .then(data => {
         tableBody.innerHTML = ''; // Clear loading message
         const vars = data.head.vars;
@@ -132,9 +160,18 @@ order by ?revisions ?published ?title
         });
       })
       .catch(e => {
-        console.error('Error fetching or parsing data:', e);
-        tableBody.innerHTML = `<tr><td colspan="4" style="text-align: center; color: red;">Error loading data: ${e.message}</td></tr>`;
-      });
+          console.error('Error fetching or parsing data:', e);
+          tableBody.innerHTML = `<tr><td colspan="4" style="text-align: center; color: red;">Error loading data: ${e.message}</td></tr>`;
+        });
+    }
+
+    // Initial load
+    fetchWorks(authorSelect.value);
+
+    // Add event listener for author selection change
+    authorSelect.addEventListener('change', (event) => {
+      fetchWorks(event.target.value);
+    });
   </script>
 </body>
 </html>
