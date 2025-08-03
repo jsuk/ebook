@@ -402,9 +402,10 @@ LIMIT 100
                 newOption.value = authorId;
                 newOption.textContent = authorName;
                 authorSelect.prepend(newOption);
-                authorSelect.value = authorId;
                 addAuthorToDb({ id: authorId, name: authorName });
               }
+              authorSelect.value = authorId;
+              localStorage.setItem('lastSelectedAuthor', authorId);
             });
             li.appendChild(a);
             ul.appendChild(li);
