@@ -522,7 +522,7 @@ order by ?revisions ?published ?title
             // Check if the value is a URL and make it a link
 	    // split value by newline for revisions, links, and isbns
 	    if (v === 'revisions' || v === 'links' || v === 'isbns') {
-	      const values = value.split('\n').filter(val => val.trim() !== '');
+	      const values = value.split(',').filter(val => val.trim() !== '');
 	      if (values.length > 0) {
 	        const list = document.createElement('ul');
 	        values.forEach(val => {
@@ -643,6 +643,7 @@ SELECT ?jpEntity WHERE {
           if (hasJPSearchEntity) {
             const jpSearchURI = jpData.results.bindings[0].jpEntity.value;
             return {
+              ndlId: ndlAuthorId,
               creator: { value: jpSearchURI },
               authorName: { value: jpSearchURI.split('/').pop() }
             };
@@ -831,13 +832,10 @@ LIMIT 50`;
         const transcription = binding.transcription ? binding.transcription.value : null;
         const koreanName = binding.koreanName ? binding.koreanName.value : null;
         
-        // Extract base name (remove punctuation and spaces for matching)
-        const baseName = normalizeAuthorName(authorName);
-        
         const author = {
           ndlId: authorId,
           ndlName: authorName,
-          baseName: baseName,
+          baseName: normalizeAuthorName(authorName),
           birthDate: birthDate,
           deathDate: deathDate,
           transcription: transcription,
@@ -846,35 +844,20 @@ LIMIT 50`;
           jpSearchId: null
         };
         
-        authorMap.set(baseName, author);
+        authorMap.set(authorId, author);
       });
       
       // Process JPSearch results and merge with NDL
       jpSearchBindings.forEach(binding => {
-        const authorId = binding.creator.value;
-        const authorName = binding.authorName.value;
-        const baseName = normalizeAuthorName(authorName);
+        const ndlId = binding.ndlId;
         
-        if (authorMap.has(baseName)) {
+        if (authorMap.has(ndlId)) {
           // Merge with existing NDL entry
-          const existing = authorMap.get(baseName);
+          const existing = authorMap.get(ndlId);
           existing.hasISBN = true;
-          existing.jpSearchId = authorId;
+          existing.jpSearchId = binding.creator.value;
         } else {
-          // New author not in NDL
-          const author = {
-            ndlId: null,
-            ndlName: null,
-            baseName: baseName,
-            birthDate: null,
-            deathDate: null,
-            transcription: null,
-            koreanName: null,
-            hasISBN: true,
-            jpSearchId: authorId,
-            jpSearchName: authorName
-          };
-          authorMap.set(baseName, author);
+          // This case should not happen if the logic in searchAuthorsWithStrategy is correct
         }
       });
       
