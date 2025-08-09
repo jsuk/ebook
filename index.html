@@ -178,6 +178,60 @@ a:hover {
       text-align: center;
       padding: 2rem;
       color: #666;
+      position: relative;
+      animation: pulse 2s infinite;
+    }
+    
+    .loading::after {
+      content: '';
+      display: inline-block;
+      width: 20px;
+      height: 20px;
+      margin-left: 10px;
+      border: 2px solid #ddd;
+      border-top: 2px solid #007AFF;
+      border-radius: 50%;
+      animation: spin 1s linear infinite;
+      vertical-align: middle;
+    }
+    
+    @keyframes spin {
+      0% { transform: rotate(0deg); }
+      100% { transform: rotate(360deg); }
+    }
+    
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.7; }
+    }
+    
+    /* Smooth transitions for results */
+    .search-results {
+      transition: all 0.3s ease;
+      opacity: 0;
+      animation: fadeIn 0.5s ease forwards;
+    }
+    
+    @keyframes fadeIn {
+      from {
+        opacity: 0;
+        transform: translateY(10px);
+      }
+      to {
+        opacity: 1;
+        transform: translateY(0);
+      }
+    }
+    
+    /* Performance optimizations */
+    * {
+      backface-visibility: hidden;
+      -webkit-backface-visibility: hidden;
+    }
+    
+    table {
+      transform: translateZ(0);
+      will-change: scroll-position;
     }
     
     /* Desktop styles */
@@ -271,6 +325,11 @@ a:hover {
     
     <div id="knl-status" style="display: none; padding: 8px; margin: 10px 0; border-radius: 4px; font-size: 0.9em;"></div>
     
+    <div id="debug-info" style="display: none; padding: 8px; margin: 10px 0; border-radius: 4px; font-size: 0.8em; background-color: #f8f9fa; border: 1px solid #dee2e6;">
+      <h4>🔧 Debug Information</h4>
+      <div id="debug-content"></div>
+    </div>
+    
     <div class="table-container">
       <table id="results-table">
         <thead>
@@ -289,6 +348,7 @@ a:hover {
     <h2>JavaScript Error</h2>
     <pre id="error-message"></pre>
   </div>
+  <script src="sparql-queries.js"></script>
   <script>
     window.onerror = function(message, source, lineno, colno, error) {
       document.getElementById('error-container').style.display = 'block';
@@ -304,11 +364,73 @@ a:hover {
     const tableBody = document.querySelector('#results-table tbody');
     const authorSelect = document.getElementById('author-select');
 
+    // Global array to track all SPARQL queries for debugging
+    let executedQueries = [];
+
+    // Function to log SPARQL queries for debugging
+    function logQuery(endpoint, query, queryName, status = 'executing', results = 0, error = null, url = null) {
+      // Validate query using SparqlUtils if available
+      let validation = { valid: true, issues: [] };
+      if (typeof SparqlUtils !== 'undefined') {
+        const extractedAuthorId = SparqlUtils.extractAuthorId(query);
+        const queryType = SparqlUtils.getQueryType(query);
+        
+        if (!extractedAuthorId) {
+          validation.issues.push('No author ID found in query');
+          validation.valid = false;
+        }
+        
+        validation.authorId = extractedAuthorId;
+        validation.queryType = queryType;
+      }
+      
+      const logEntry = {
+        timestamp: new Date().toISOString(),
+        endpoint: endpoint,
+        queryName: queryName,
+        query: query.trim(),
+        status: status,
+        resultCount: results,
+        error: error,
+        validation: validation
+      };
+      
+      // Add the full executable URL if provided
+      if (url) {
+        logEntry.executableUrl = url;
+      }
+      
+      executedQueries.push(logEntry);
+      console.log(`🔍 SPARQL Query logged: ${endpoint} - ${queryName} - ${status}`);
+      console.log('📋 Complete query:', query.trim());
+      
+      if (!validation.valid) {
+        console.warn('⚠️ Query validation issues:', validation.issues);
+      }
+    }
+
+    // Function to clear query log for new searches
+    function clearQueryLog() {
+      executedQueries = [];
+    }
+
+    // Function to HTML encode text for safe display
+    function htmlEncode(str) {
+      return str
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+    }
+
     // IndexedDB setup
     const DB_NAME = 'author_db';
-    const DB_VERSION = 1; // Increment this for schema changes
+    const DB_VERSION = 2; // Increment this for schema changes
     const STORE_NAME = 'authors';
-    const CACHE_SCHEMA_VERSION = '1.0'; // For debugging purposes
+    const WORKS_STORE_NAME = 'works_cache';
+    const CACHE_SCHEMA_VERSION = '2.0'; // For debugging purposes
+    const WORKS_CACHE_DURATION = 10 * 60 * 1000; // 10 minutes
 
     let db;
 
@@ -320,6 +442,9 @@ a:hover {
           db = event.target.result;
           if (!db.objectStoreNames.contains(STORE_NAME)) {
             db.createObjectStore(STORE_NAME, { keyPath: 'id' });
+          }
+          if (!db.objectStoreNames.contains(WORKS_STORE_NAME)) {
+            db.createObjectStore(WORKS_STORE_NAME, { keyPath: 'authorId' });
           }
         };
 
@@ -446,157 +571,595 @@ a:hover {
 
     function clearAllAuthorsFromDb() {
       return new Promise((resolve, reject) => {
-        const transaction = db.transaction([STORE_NAME], 'readwrite');
-        const store = transaction.objectStore(STORE_NAME);
-        const request = store.clear();
+        const transaction = db.transaction([STORE_NAME, WORKS_STORE_NAME], 'readwrite');
+        const authorsStore = transaction.objectStore(STORE_NAME);
+        const worksStore = transaction.objectStore(WORKS_STORE_NAME);
+        
+        const clearAuthors = authorsStore.clear();
+        const clearWorks = worksStore.clear();
+
+        Promise.all([
+          new Promise((res, rej) => {
+            clearAuthors.onsuccess = res;
+            clearAuthors.onerror = rej;
+          }),
+          new Promise((res, rej) => {
+            clearWorks.onsuccess = res;
+            clearWorks.onerror = rej;
+          })
+        ]).then(() => {
+          console.log('All cached data cleared from IndexedDB.');
+          resolve();
+        }).catch((error) => {
+          console.error('Error clearing cache from DB:', error);
+          reject(error);
+        });
+      });
+    }
+
+    function cacheWorksData(authorId, jpResults, knlResults) {
+      return new Promise((resolve, reject) => {
+        const transaction = db.transaction([WORKS_STORE_NAME], 'readwrite');
+        const store = transaction.objectStore(WORKS_STORE_NAME);
+        
+        const cacheEntry = {
+          authorId: authorId,
+          jpResults: jpResults,
+          knlResults: knlResults,
+          timestamp: Date.now()
+        };
+        
+        const request = store.put(cacheEntry);
+        request.onsuccess = () => resolve();
+        request.onerror = (event) => {
+          console.error('Error caching works data:', event.target.errorCode);
+          reject(event.target.errorCode);
+        };
+      });
+    }
+
+    function getCachedWorksData(authorId) {
+      return new Promise((resolve, reject) => {
+        const transaction = db.transaction([WORKS_STORE_NAME], 'readonly');
+        const store = transaction.objectStore(WORKS_STORE_NAME);
+        const request = store.get(authorId);
 
         request.onsuccess = () => {
-          console.log('All authors cleared from IndexedDB.');
-          resolve();
+          const result = request.result;
+          if (result && (Date.now() - result.timestamp < WORKS_CACHE_DURATION)) {
+            resolve(result);
+          } else {
+            resolve(null); // Cache expired or not found
+          }
         };
 
         request.onerror = (event) => {
-          console.error('Error clearing authors from DB:', event.target.errorCode);
-          reject(event.target.errorCode);
+          console.error('Error getting cached works data:', event.target.errorCode);
+          resolve(null); // Return null on error to proceed with fresh fetch
         };
       });
     }
 
     const clearCacheButton = document.getElementById('clear-cache-button');
     clearCacheButton.addEventListener('click', async () => {
-      if (confirm('Are you sure you want to clear all cached author data?')) {
+      if (confirm('Are you sure you want to clear all cached data (authors and works)?')) {
         await clearAllAuthorsFromDb();
+        console.log('All cached data cleared - page will reload');
         // Optionally, reload the page or re-populate the select with only initial authors
         location.reload(); 
       }
     });
 
     async function fetchWorks(authorId) {
+      // Clear query log for this new search
+      clearQueryLog();
+      
       // Clear previous results and show loading message
       tableHead.innerHTML = '';
-      tableBody.innerHTML = '<tr><td colspan="6">Loading...</td></tr>';
+      tableBody.innerHTML = '<tr><td colspan="6" class="loading">🔍 Checking cache...</td></tr>';
 
       try {
-        // Fetch from both JPSearch and KNL concurrently
-        const [jpResults, knlResults] = await Promise.all([
-          fetchJPSearchWorks(authorId),
-          fetchKNLWorks(authorId)
-        ]);
+        // Check cache first
+        const cachedData = await getCachedWorksData(authorId);
+        if (cachedData) {
+          console.log('Using cached works data for:', authorId);
+          tableBody.innerHTML = '<tr><td colspan="6" class="loading">📚 Loading from cache...</td></tr>';
+          await new Promise(resolve => setTimeout(resolve, 100)); // Brief delay for UX
+          displayUnifiedResults(cachedData.jpResults, cachedData.knlResults);
+          return;
+        }
+
+        // Detect author locale based on ID
+        const detectedLocale = detectAuthorLocale(authorId);
+        const config = localeConfig[detectedLocale];
+        console.log(`🔍 Author locale: ${detectedLocale} | Target endpoints: ${config.endpoints.join(', ')}`);
+
+        // No cache, proceed with fresh fetch
+        tableBody.innerHTML = `<tr><td colspan="6" class="loading">🔍 Initializing ${detectedLocale} search...</td></tr>`;
+        
+        let jpResults = null, knlResults = null;
+        let jpStatus = 'pending', knlStatus = 'pending';
+        
+        // Progress callback to update loading status in real-time
+        const updateProgressStatus = (source, status) => {
+          if (source === 'jp') jpStatus = status;
+          if (source === 'knl') knlStatus = status;
+          
+          let statusText = `🔍 ${detectedLocale} search: `;
+          const statuses = [];
+          
+          if (config.endpoints.includes('jpsearch') && jpStatus !== 'completed' && jpStatus !== 'skipped') {
+            statuses.push(jpStatus);
+          }
+          if (config.endpoints.includes('knl') && knlStatus !== 'completed' && knlStatus !== 'skipped') {
+            statuses.push(knlStatus);
+          }
+          
+          if (statuses.length > 0) {
+            statusText += statuses.join(' | ');
+          } else {
+            const skipped = ['jpsearch', 'knl'].filter(ep => !config.endpoints.includes(ep));
+            if (skipped.length > 0) {
+              statusText = `⚡ ${detectedLocale} optimized (skipped: ${skipped.join(', ')}) | 💾 Caching...`;
+            } else {
+              statusText = '💾 Caching results...';
+            }
+          }
+          
+          tableBody.innerHTML = `<tr><td colspan="6" class="loading">${statusText}</td></tr>`;
+        };
+        
+        // Create progress callbacks for each source
+        const jpProgressCallback = (status) => updateProgressStatus('jp', status);
+        const knlProgressCallback = (status) => updateProgressStatus('knl', status);
+        
+        // Start only relevant searches based on detected locale
+        const searchPromises = [];
+        
+        if (config.endpoints.includes('jpsearch')) {
+          const jpPromise = fetchJPSearchWorks(authorId, jpProgressCallback).then(result => {
+            jpResults = result;
+            jpStatus = 'completed';
+            updateProgressStatus('jp', 'completed');
+            return result;
+          });
+          searchPromises.push(jpPromise);
+        } else {
+          jpResults = { source: 'JPSearch', bindings: [], vars: [] };
+          jpStatus = 'skipped';
+        }
+        
+        if (config.endpoints.includes('knl')) {
+          const knlPromise = fetchKNLWorks(authorId, knlProgressCallback).then(result => {
+            knlResults = result;
+            knlStatus = 'completed';
+            updateProgressStatus('knl', 'completed');
+            return result;
+          });
+          searchPromises.push(knlPromise);
+        } else {
+          knlResults = { source: 'KNL', bindings: [], vars: [] };
+          knlStatus = 'skipped';
+        }
+        
+        // Wait only for the endpoints we're actually searching
+        if (searchPromises.length > 0) {
+          await Promise.all(searchPromises);
+        }
+        
+        // Cache the results
+        tableBody.innerHTML = '<tr><td colspan="6" class="loading">💾 Caching results...</td></tr>';
+        try {
+          await cacheWorksData(authorId, jpResults, knlResults);
+          console.log('Works data cached for:', authorId);
+        } catch (e) {
+          console.warn('Failed to cache works data:', e);
+        }
+        
+        // Final processing message
+        tableBody.innerHTML = '<tr><td colspan="6" class="loading">📊 Processing and displaying results...</td></tr>';
+        
+        // Small delay to show processing message
+        await new Promise(resolve => setTimeout(resolve, 100));
+        
+        // Log performance summary with optimization info
+        const totalJPResults = jpResults.bindings ? jpResults.bindings.length : 0;
+        const totalKNLResults = knlResults.bindings ? knlResults.bindings.length : 0;
+        const skippedEndpoints = ['jpsearch', 'knl'].filter(ep => !config.endpoints.includes(ep));
+        
+        console.log(`⚡ Locale-optimized results (${detectedLocale}): JPSearch: ${totalJPResults}, KNL: ${totalKNLResults}`);
+        if (skippedEndpoints.length > 0) {
+          console.log(`🚀 Performance boost: Skipped ${skippedEndpoints.join(', ')} endpoints`);
+        }
+
+        // Always show debug info for now to help troubleshoot
+        showDebugInfo(authorId, detectedLocale, config, jpResults, knlResults);
 
         // Union and display results
         displayUnifiedResults(jpResults, knlResults);
+        
       } catch (e) {
         console.error('Error fetching works:', e);
-        tableBody.innerHTML = `<tr><td colspan="6" style="text-align: center; color: red;">Error loading data: ${e.message}</td></tr>`;
+        tableBody.innerHTML = `<tr><td colspan="6" style="text-align: center; color: #FF3B30; background-color: #ffebeb; padding: 2rem;">
+          <strong>Error Loading Works</strong><br>
+          ${e.message}<br>
+          <small>Please try selecting the author again or check your connection.</small>
+        </td></tr>`;
       }
     }
 
-    function fetchJPSearchWorks(authorId) {
-      const sparqlQuery = `
-PREFIX chname: <https://jpsearch.go.jp/entity/chname/>
-PREFIX owl: <http://www.w3.org/2002/07/owl#>
-PREFIX schema: <http://schema.org/>
-SELECT
-min(?d) as ?published
-?o as ?title
-GROUP_CONCAT(DISTINCT ?d; separator=",") as ?revisions
-group_concat(DISTINCT ?s; separator=",") AS ?links
-group_concat(DISTINCT ?isbn; separator=",") AS ?isbns
-WHERE {
-{
-select DISTINCT ?s ?o ?d ?isbn where {
-     {
-      ?s ?p <${authorId}>;
-      rdfs:label ?o;
-      schema:datePublished ?d .
-      OPTIONAL { ?s schema:isbn ?isbn }
-     }
-     UNION
-     {
-      ?s schema:creator <${authorId}>;
-      rdfs:label ?o;
-      schema:datePublished ?d .
-      OPTIONAL { ?s schema:isbn ?isbn }
-     }
-}
-order by ?d ?o
-}
-}
-order by ?revisions ?published ?title
-`;
+    async function fetchJPSearchWorks(authorId, progressCallback) {
+      const allResults = [];
+      let queryCount = 0;
 
-      const url = `${jpsEndpoint}?query=${encodeURIComponent(sparqlQuery)}&format=json`;
+      // Use SPARQL query from external module
+      console.log(`🔍 JPSearch: Building query for authorId: ${authorId}`);
+      const query1 = SparqlQueries.jpSearch.worksByAuthor(authorId);
+      console.log(`📋 JPSearch: Complete query built:`, query1);
+      console.log(`🔧 Query type: ${SparqlUtils.getQueryType(query1)}`);
 
-      return fetch(url)
-        .then(res => {
-          if (!res.ok) {
-            throw new Error(`JPSearch HTTP error! status: ${res.status}`);
+      // For now, disable the ?p query which might not be working properly
+      const query2 = null;
+
+      const queries = [
+        { query: query1, name: 'schema:creator works' }
+      ].filter(q => q.query !== null); // Only include non-null queries
+
+      try {
+        for (const { query, name } of queries) {
+          queryCount++;
+          if (progressCallback) {
+            progressCallback(`📚 JPSearch: ${name} (${queryCount}/${queries.length})`);
           }
-          return res.json();
-        })
-        .then(data => ({
+
+          // Retry logic for failed queries
+          let attempts = 0;
+          const maxAttempts = 3;
+          let success = false;
+          
+          while (attempts < maxAttempts && !success) {
+            try {
+              attempts++;
+              if (attempts > 1 && progressCallback) {
+                progressCallback(`📚 JPSearch: ${name} (retry ${attempts}/${maxAttempts})`);
+              }
+              
+              const url = `${jpsEndpoint}?query=${encodeURIComponent(query)}&format=json`;
+              
+              // Log the complete executable query with URL
+              logQuery(jpsEndpoint, query, name, 'executing', 0, null, url);
+              
+              const response = await fetch(url, { 
+                timeout: 30000 // 30 second timeout for complex queries
+              });
+              
+              if (!response.ok) {
+                if (attempts === maxAttempts) {
+                  throw new Error(`JPSearch HTTP error! status: ${response.status}`);
+                }
+                console.warn(`JPSearch ${name} attempt ${attempts} failed: ${response.status}, retrying...`);
+                await new Promise(resolve => setTimeout(resolve, 1000 * attempts)); // Exponential backoff
+                continue;
+              }
+              
+              const data = await response.json();
+              console.log(`JPSearch ${name} response:`, data);
+              
+              if (data.results && data.results.bindings && Array.isArray(data.results.bindings)) {
+                console.log(`JPSearch ${name} - Raw bindings:`, data.results.bindings.slice(0, 2));
+                allResults.push(...data.results.bindings);
+                console.log(`JPSearch ${name}: ${data.results.bindings.length} results added, total: ${allResults.length}`);
+                
+                // Log successful query
+                logQuery(jpsEndpoint, query, name, 'completed', data.results.bindings.length, null, url);
+                success = true;
+              } else {
+                console.warn(`JPSearch ${name}: No results structure found`);
+                console.warn('Response structure:', Object.keys(data || {}));
+                
+                // Log query with no results
+                logQuery(jpsEndpoint, query, name, 'no_results', 0, null, url);
+                success = true; // Don't retry for empty results
+              }
+              
+            } catch (fetchError) {
+              if (attempts === maxAttempts) {
+                console.error(`JPSearch ${name} failed after ${maxAttempts} attempts:`, fetchError);
+                // Log failed query
+                logQuery(jpsEndpoint, query, name, 'error', 0, fetchError.message, url);
+                // Continue with other queries even if one fails
+              } else {
+                console.warn(`JPSearch ${name} attempt ${attempts} failed:`, fetchError.message);
+                await new Promise(resolve => setTimeout(resolve, 1000 * attempts)); // Exponential backoff
+              }
+            }
+          }
+          
+          // Brief pause to allow UI to update and show progress
+          await new Promise(resolve => setTimeout(resolve, 100));
+        }
+
+        // Group results by title and aggregate data client-side
+        const groupedResults = groupJPSearchResults(allResults);
+        
+        return {
           source: 'JPSearch',
-          bindings: data.results ? data.results.bindings : [],
-          vars: data.head ? data.head.vars : []
-        }))
-        .catch(e => {
-          console.error('JPSearch error:', e);
-          return { source: 'JPSearch', bindings: [], vars: [], error: e.message };
-        });
+          bindings: groupedResults,
+          vars: ['published', 'title', 'revisions', 'links', 'isbns']
+        };
+      } catch (e) {
+        console.error('JPSearch error:', e);
+        return { source: 'JPSearch', bindings: [], vars: [], error: e.message };
+      }
     }
 
-    function fetchKNLWorks(authorId) {
+    // Group JPSearch results by title and aggregate metadata
+    function groupJPSearchResults(rawResults) {
+      console.log('Processing raw JPSearch results:', rawResults.length, 'items');
+      console.log('First few items:', rawResults.slice(0, 3));
+      
+      const grouped = new Map();
+      
+      rawResults.forEach((item, index) => {
+        const title = item.o ? item.o.value : '';
+        const published = item.d ? item.d.value : '';
+        const workLink = item.s ? item.s.value : ''; // URI of the work itself  
+        const directLink = item.link ? item.link.value : ''; // Direct URL if available
+        const isbn = item.isbn ? item.isbn.value : ''; // This might be undefined now
+        
+        const bestLink = directLink || workLink; // Prefer direct URLs over work URIs
+        console.log(`Item ${index}: title="${title}", published="${published}", workLink="${workLink}", directLink="${directLink}"`);
+        
+        if (!title) {
+          console.warn(`Skipping item ${index} - no title`);
+          return; // Skip items without title
+        }
+        
+        const key = title;
+        if (!grouped.has(key)) {
+          grouped.set(key, {
+            title: { value: title },
+            published: { value: published },
+            revisions: { value: published },
+            links: { value: bestLink },
+            isbns: { value: isbn || '' }
+          });
+        } else {
+          // Merge additional data
+          const existing = grouped.get(key);
+          
+          // Keep earliest publication date
+          if (published && (!existing.published.value || published < existing.published.value)) {
+            existing.published.value = published;
+          }
+          
+          // Accumulate revisions (dates)
+          if (published && existing.revisions.value && !existing.revisions.value.includes(published)) {
+            existing.revisions.value += ',' + published;
+          }
+          
+          // Accumulate links
+          if (bestLink && existing.links.value && !existing.links.value.includes(bestLink)) {
+            existing.links.value += ',' + bestLink;
+          }
+          
+          // Accumulate ISBNs
+          if (isbn && existing.isbns.value && !existing.isbns.value.includes(isbn)) {
+            existing.isbns.value += ',' + isbn;
+          }
+        }
+      });
+      
+      const result = Array.from(grouped.values());
+      console.log('Grouped JPSearch results:', result.length, 'unique works');
+      console.log('Sample grouped result:', result[0]);
+      
+      return result;
+    }
+
+    // Show debug information when no results are found
+    function showDebugInfo(authorId, detectedLocale, config, jpResults, knlResults) {
+      const debugDiv = document.getElementById('debug-info');
+      const debugContent = document.getElementById('debug-content');
+      
+      // Generate SPARQL queries section
+      let queriesHtml = '';
+      if (executedQueries.length > 0) {
+        queriesHtml = `
+          <h5>🔍 Executed SPARQL Queries (${executedQueries.length} total)</h5>
+          <div style="max-height: 400px; overflow-y: auto; border: 1px solid #ddd; padding: 10px; margin: 10px 0; background-color: #f9f9f9;">
+        `;
+        
+        executedQueries.forEach((q, index) => {
+          const statusColor = q.status === 'completed' ? '#28a745' : 
+                             q.status === 'error' ? '#dc3545' : 
+                             q.status === 'no_results' ? '#ffc107' : '#6c757d';
+          
+          queriesHtml += `
+            <div style="margin-bottom: 15px; padding: 10px; border-left: 4px solid ${statusColor}; background-color: white;">
+              <div style="display: flex; justify-content: between; align-items: center; margin-bottom: 5px;">
+                <strong>Query ${index + 1}: ${q.queryName}</strong>
+                <span style="margin-left: auto; font-size: 0.8em; color: ${statusColor};">
+                  ${q.status.toUpperCase()} (${q.resultCount} results)
+                </span>
+              </div>
+              <div style="font-size: 0.8em; color: #666; margin-bottom: 5px;">
+                <strong>Endpoint:</strong> ${q.endpoint} | 
+                <strong>Time:</strong> ${new Date(q.timestamp).toLocaleTimeString()}
+                ${q.validation ? ` | <strong>Type:</strong> ${q.validation.queryType}` : ''}
+                ${q.validation && q.validation.authorId ? ` | <strong>Author ID:</strong> ${q.validation.authorId.substring(q.validation.authorId.lastIndexOf('/') + 1)}` : ''}
+                ${q.error ? ` | <strong style="color: #dc3545;">Error:</strong> ${q.error}` : ''}
+                ${q.validation && !q.validation.valid ? ` | <strong style="color: #dc3545;">⚠️ Issues:</strong> ${q.validation.issues.join(', ')}` : ''}
+              </div>
+              <details style="margin-top: 5px;">
+                <summary style="cursor: pointer; font-size: 0.8em; color: #007AFF;">Show Complete SPARQL Query & URLs</summary>
+                <div style="margin: 5px 0;">
+                  <strong style="font-size: 0.8em;">📋 Executable SPARQL Query:</strong>
+                  <pre style="background-color: #f8f9fa; padding: 10px; margin: 5px 0; overflow-x: auto; font-size: 0.7em; white-space: pre-wrap; border: 1px solid #dee2e6;">${htmlEncode(q.query)}</pre>
+                  ${q.executableUrl ? `
+                    <strong style="font-size: 0.8em;">🔗 Executable URL(s):</strong>
+                    <pre style="background-color: #e7f3ff; padding: 10px; margin: 5px 0; overflow-x: auto; font-size: 0.7em; white-space: pre-wrap; border: 1px solid #b3d9ff;">${htmlEncode(q.executableUrl)}</pre>
+                    <div style="margin-top: 5px;">
+                      <button onclick="navigator.clipboard.writeText('${q.query.replace(/'/g, "\\'")}'); alert('SPARQL query copied to clipboard!');" 
+                              style="font-size: 0.7em; padding: 2px 8px; margin-right: 5px; background: #007AFF; color: white; border: none; border-radius: 3px; cursor: pointer;">
+                        Copy Query
+                      </button>
+                      <button onclick="navigator.clipboard.writeText('${q.executableUrl.replace(/'/g, "\\'")}'); alert('URL copied to clipboard!');" 
+                              style="font-size: 0.7em; padding: 2px 8px; margin-right: 5px; background: #28a745; color: white; border: none; border-radius: 3px; cursor: pointer;">
+                        Copy URL
+                      </button>
+                      <button onclick="window.open('${q.executableUrl.split('\\n')[0].replace('Direct: ', '')}', '_blank');" 
+                              style="font-size: 0.7em; padding: 2px 8px; background: #ffc107; color: black; border: none; border-radius: 3px; cursor: pointer;">
+                        🚀 Test Query
+                      </button>
+                    </div>
+                  ` : ''}
+                </div>
+              </details>
+            </div>
+          `;
+        });
+        
+        queriesHtml += '</div>';
+      } else {
+        queriesHtml = '<p><em>No SPARQL queries executed yet.</em></p>';
+      }
+      
+      let debugHtml = `
+        <p><strong>Author ID:</strong> ${authorId}</p>
+        <p><strong>Detected Locale:</strong> ${detectedLocale}</p>
+        <p><strong>Target Endpoints:</strong> ${config.endpoints.join(', ')}</p>
+        <p><strong>JPSearch Status:</strong> ${jpResults.error || 'OK'} (${jpResults.bindings ? jpResults.bindings.length : 0} results)</p>
+        <p><strong>KNL Status:</strong> ${knlResults.error || 'OK'} (${knlResults.bindings ? knlResults.bindings.length : 0} results)</p>
+        
+        ${queriesHtml}
+        
+        <h5>🛠️ Troubleshooting</h5>
+        <ul>
+          <li>Try clearing cache and reloading</li>
+          <li>Check if CORS proxy is running on port 8001 for KNL</li>
+          <li>Verify the author ID is correct in the database</li>
+          <li>Try searching for the author by name instead</li>
+          <li>Review SPARQL queries above for syntax errors</li>
+        </ul>
+      `;
+      
+      debugContent.innerHTML = debugHtml;
+      debugDiv.style.display = 'block';
+    }
+
+    async function fetchKNLWorks(authorId, progressCallback) {
       // Check if this is a KNL author URI
       let knlAuthorId = authorId;
       
-      if (!authorId.startsWith('http://lod.nl.go.kr/')) {
+      console.log(`🔍 fetchKNLWorks called with authorId: "${authorId}" (type: ${typeof authorId})`);
+      
+      if (!authorId || !authorId.startsWith('http://lod.nl.go.kr/')) {
+        console.log(`❌ Not a KNL URI, returning empty results for: ${authorId}`);
         // If it's not a KNL URI, return empty results for non-KNL authors
         return Promise.resolve({ source: 'KNL', bindings: [], vars: [] });
       }
 
-      const sparqlQuery = `
-PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
-PREFIX dcterms: <http://purl.org/dc/terms/> 
-PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
-PREFIX nlon: <http://lod.nl.go.kr/ontology/>
-PREFIX bibo: <http://purl.org/ontology/bibo/>
-SELECT ?work ?title ?issued ?isbn WHERE { 
-    ?work dcterms:creator <${knlAuthorId}> ;
-          dcterms:title ?title ;
-          dcterms:issued ?issued .
-    OPTIONAL { ?work bibo:isbn ?isbn }
-}
-ORDER BY ?issued ?title
-LIMIT 50
-`;
+      if (progressCallback) {
+        progressCallback('🇰🇷 KNL: Loading works...');
+      }
 
-      // Use local CORS proxy for KNL since the endpoint doesn't support CORS
+      console.log(`🇰🇷 KNL: Building query for knlAuthorId: ${knlAuthorId}`);
+      const sparqlQuery = SparqlQueries.knl.worksByAuthor(knlAuthorId);
+      console.log(`📋 KNL: Complete query built:`, sparqlQuery);
+      console.log(`🔧 Query type: ${SparqlUtils.getQueryType(sparqlQuery)}`);
+
+      // Prepare URLs outside try block for access in catch block
       const knlDirectUrl = `${knlEndpoint}?query=${encodeURIComponent(sparqlQuery)}&format=json&type=json`;
       const url = `http://localhost:8001/?url=${encodeURIComponent(knlDirectUrl)}`;
 
-      return fetch(url)
-        .then(res => {
-          if (!res.ok) {
-            if (res.status === 0 || res.status >= 500) {
-              throw new Error('KNL proxy not available');
+      try {
+        // Log the KNL query being executed with both proxy URL and direct URL
+        logQuery('KNL (via proxy)', sparqlQuery, 'works query', 'executing', 0, null, `Direct: ${knlDirectUrl}\nProxy: ${url}`);
+
+        // Add retry logic for KNL queries
+        let attempts = 0;
+        const maxAttempts = 2;
+        
+        while (attempts < maxAttempts) {
+          attempts++;
+          try {
+            if (progressCallback && attempts > 1) {
+              progressCallback(`🇰🇷 KNL: Loading works... (retry ${attempts}/${maxAttempts})`);
             }
-            throw new Error(`KNL HTTP error! status: ${res.status}`);
+            
+            const response = await fetch(url, {
+              timeout: 15000 // 15 second timeout for KNL
+            });
+            
+            if (!response.ok) {
+              if (response.status === 0 || response.status >= 500) {
+                if (attempts === maxAttempts) {
+                  throw new Error('KNL proxy not available');
+                }
+                console.warn(`KNL attempt ${attempts} failed: ${response.status}, retrying...`);
+                await new Promise(resolve => setTimeout(resolve, 2000));
+                continue;
+              }
+              throw new Error(`KNL HTTP error! status: ${response.status}`);
+            }
+            
+            const responseText = await response.text();
+            console.log('KNL raw response:', responseText.substring(0, 200) + '...');
+            
+            let data;
+            try {
+              data = JSON.parse(responseText);
+            } catch (jsonError) {
+              console.warn('KNL JSON parse error:', jsonError.message);
+              console.warn('Response text:', responseText);
+              
+              // If it's an error response from proxy, extract the error
+              if (responseText.includes('"error"')) {
+                try {
+                  const errorData = JSON.parse(responseText);
+                  throw new Error(`KNL proxy error: ${errorData.error}`);
+                } catch {
+                  throw new Error('KNL returned invalid JSON format');
+                }
+              } else {
+                throw new Error('KNL returned non-JSON response');
+              }
+            }
+            
+            const resultCount = data.results ? data.results.bindings.length : 0;
+            console.log(`KNL: ${resultCount} results after ${attempts} attempt(s)`);
+            
+            // Log successful KNL query
+            logQuery('KNL (via proxy)', sparqlQuery, 'works query', 'completed', resultCount, null, `Direct: ${knlDirectUrl}\nProxy: ${url}`);
+            
+            return {
+              source: 'KNL',
+              bindings: data.results ? data.results.bindings : [],
+              vars: data.head ? data.head.vars : []
+            };
+            
+          } catch (fetchError) {
+            if (attempts === maxAttempts) {
+              throw fetchError;
+            }
+            console.warn(`KNL attempt ${attempts} failed:`, fetchError.message);
+            await new Promise(resolve => setTimeout(resolve, 2000));
           }
-          return res.json();
-        })
-        .then(data => ({
-          source: 'KNL',
-          bindings: data.results ? data.results.bindings : [],
-          vars: data.head ? data.head.vars : []
-        }))
-        .catch(e => {
-          if (e.message.includes('proxy not available')) {
-            console.warn('KNL proxy is not running - KNL work search disabled');
-          } else {
-            console.error('KNL error:', e);
-          }
-          return { source: 'KNL', bindings: [], vars: [], error: e.message };
-        });
+        }
+      } catch (e) {
+        // Log failed KNL query
+        logQuery('KNL (via proxy)', sparqlQuery, 'works query', 'error', 0, e.message, `Direct: ${knlDirectUrl}\nProxy: ${url}`);
+        
+        if (e.message.includes('proxy not available')) {
+          console.warn('KNL proxy is not running - KNL work search disabled');
+        } else if (e.message.includes('timeout')) {
+          console.warn('KNL query timed out - endpoint may be slow');
+        } else {
+          console.error('KNL error:', e);
+        }
+        return { source: 'KNL', bindings: [], vars: [], error: e.message };
+      }
     }
 
     function displayUnifiedResults(jpResults, knlResults) {
@@ -754,46 +1317,152 @@ LIMIT 50
     const authorSearchInput = document.getElementById('author-search-input');
     const searchAuthorButton = document.getElementById('search-author-button');
     const authorSearchResults = document.getElementById('author-search-results');
+    
+    let searchTimeout;
+    let currentSearchController;
 
+    // Debounced search on input
+    authorSearchInput.addEventListener('input', () => {
+      const authorName = authorSearchInput.value.trim();
+      
+      // Cancel previous timeout
+      if (searchTimeout) {
+        clearTimeout(searchTimeout);
+      }
+      
+      // Cancel previous request
+      if (currentSearchController) {
+        currentSearchController.abort();
+      }
+      
+      if (authorName.length === 0) {
+        authorSearchResults.style.display = 'none';
+        return;
+      }
+      
+      if (authorName.length >= 2) {
+        // Show immediate loading state
+        authorSearchResults.style.display = 'block';
+        authorSearchResults.innerHTML = '<div class="loading">Searching as you type...</div>';
+        
+        // Debounce search by 300ms
+        searchTimeout = setTimeout(() => {
+          searchAuthors(authorName);
+        }, 300);
+      }
+    });
+
+    // Manual search button
     searchAuthorButton.addEventListener('click', () => {
-      const authorName = authorSearchInput.value;
+      const authorName = authorSearchInput.value.trim();
       if (authorName) {
+        // Cancel debounced search
+        if (searchTimeout) {
+          clearTimeout(searchTimeout);
+        }
         searchAuthors(authorName);
+      }
+    });
+    
+    // Enter key support
+    authorSearchInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        const authorName = authorSearchInput.value.trim();
+        if (authorName) {
+          if (searchTimeout) {
+            clearTimeout(searchTimeout);
+          }
+          searchAuthors(authorName);
+        }
       }
     });
 
     function searchAuthors(name) {
+      // Create new AbortController for this search
+      currentSearchController = new AbortController();
+      const signal = currentSearchController.signal;
+      
       authorSearchResults.style.display = 'block';
-      authorSearchResults.innerHTML = '<div class="loading">Searching authors...</div>';
+      authorSearchResults.innerHTML = '<div class="loading">🔍 Searching authors...</div>';
 
       // Try AND search first, then fallback to OR if no results
-      searchAuthorsWithStrategy(name, 'AND').then(results => {
+      searchAuthorsWithStrategy(name, 'AND', signal).then(results => {
+        // Check if request was cancelled
+        if (signal.aborted) return;
+        
         if (results.ndlBindings.length === 0 && results.jpSearchBindings.length === 0 && results.knlBindings.length === 0) {
           // No results with AND, try OR strategy
           console.log('No exact matches found, searching for partial matches...');
-          authorSearchResults.innerHTML = '<div class="loading">No exact matches found, searching for partial matches...</div>';
-          return searchAuthorsWithStrategy(name, 'OR');
+          authorSearchResults.innerHTML = '<div class="loading">🔍 No exact matches, searching partial matches...</div>';
+          return searchAuthorsWithStrategy(name, 'OR', signal);
         }
         return results;
       }).then(results => {
-        displaySearchResults(results.ndlBindings, results.jpSearchBindings, results.knlBindings);
+        // Check if request was cancelled
+        if (signal.aborted) return;
+        
+        displaySearchResults(results.ndlBindings, results.jpSearchBindings, results.knlBindings, {
+          detectedLanguage: results.detectedLanguage,
+          skippedEndpoints: results.skippedEndpoints
+        });
       }).catch(e => {
+        // Don't show error if request was cancelled
+        if (e.name === 'AbortError' || signal.aborted) {
+          console.log('Search cancelled');
+          return;
+        }
+        
         console.error('Error searching authors:', e);
-        authorSearchResults.innerHTML = `<div style="color: #FF3B30; padding: 1rem; background-color: #ffebeb; border-radius: 8px; border: 1px solid #FF3B30;">Error searching authors: ${e.message}</div>`;
+        authorSearchResults.innerHTML = `<div style="color: #FF3B30; padding: 1rem; background-color: #ffebeb; border-radius: 8px; border: 1px solid #FF3B30;">
+          <strong>Search Error:</strong> ${e.message}<br>
+          <small>Please try again or check your connection.</small>
+        </div>`;
       });
     }
 
-    async function searchAuthorsWithStrategy(name, strategy) {
-      console.log('Starting search for:', name, 'strategy:', strategy);
+    async function searchAuthorsWithStrategy(name, strategy, signal = null) {
+      const startTime = performance.now();
+      const detectedLang = detectLanguage(name);
+      const config = localeConfig[detectedLang];
       
-      // Search all three sources concurrently
+      console.log(`🔍 Search: "${name}" | Language: ${detectedLang} | Strategy: ${strategy}`);
+      console.log(`📍 Target endpoints: ${config.endpoints.join(', ')}`);
+      
+      let ndlResults = { ndlBindings: [], jpSearchBindings: [] };
+      let jpSearchResults = [];
+      let knlResults = [];
+      
       try {
-        const [ndlResults, jpSearchResults, knlResults] = await Promise.all([
-          searchNDLAuthors(name, strategy),
-          searchJPSearchAuthors(name, strategy), 
-          searchKNLAuthors(name, strategy)
-        ]);
+        // Search only relevant endpoints based on detected language
+        const searchPromises = [];
         
+        if (config.endpoints.includes('ndl')) {
+          searchPromises.push(
+            searchNDLAuthors(name, strategy, signal)
+              .then(result => { ndlResults = result; return result; })
+          );
+        }
+        
+        if (config.endpoints.includes('jpsearch')) {
+          searchPromises.push(
+            searchJPSearchAuthors(name, strategy, signal)
+              .then(result => { jpSearchResults = result; return result; })
+          );
+        }
+        
+        if (config.endpoints.includes('knl')) {
+          searchPromises.push(
+            searchKNLAuthors(name, strategy, signal)
+              .then(result => { knlResults = result; return result; })
+          );
+        }
+        
+        // Wait only for the endpoints we're actually searching
+        await Promise.all(searchPromises);
+        
+        const duration = performance.now() - startTime;
+        console.log(`⚡ Locale-optimized search completed in ${Math.round(duration)}ms`);
         console.log('Search results summary:', {
           ndl: ndlResults.ndlBindings ? ndlResults.ndlBindings.length : 0,
           jpFromNDL: ndlResults.jpSearchBindings ? ndlResults.jpSearchBindings.length : 0, 
@@ -810,24 +1479,29 @@ LIMIT 50
         return {
           ndlBindings: ndlResults.ndlBindings || [],
           jpSearchBindings: allJPSearchBindings,
-          knlBindings: knlResults || []
+          knlBindings: knlResults || [],
+          detectedLanguage: detectedLang,
+          skippedEndpoints: ['jpsearch', 'ndl', 'knl'].filter(ep => !config.endpoints.includes(ep))
         };
       } catch (error) {
-        console.error('Error in searchAuthorsWithStrategy:', error);
+        console.error('Error in locale-aware search:', error);
         return {
           ndlBindings: [],
           jpSearchBindings: [],
-          knlBindings: []
+          knlBindings: [],
+          detectedLanguage: detectedLang,
+          error: error.message
         };
       }
     }
 
-    async function searchNDLAuthors(name, strategy) {
+    async function searchNDLAuthors(name, strategy, signal = null) {
       // Step 1: Search NDL for author entities with all name variants
       const ndlQuery = buildNDLQuery(name, strategy);
       const ndlUrl = `${ndlEndpoint}?query=${encodeURIComponent(ndlQuery)}&format=json`;
       
-      const ndlData = await fetch(ndlUrl).then(res => res.ok ? res.json() : Promise.reject(new Error(`NDL query failed: ${res.status}`)));
+      const fetchOptions = signal ? { signal } : {};
+      const ndlData = await fetch(ndlUrl, fetchOptions).then(res => res.ok ? res.json() : Promise.reject(new Error(`NDL query failed: ${res.status}`)));
       const ndlBindings = ndlData.results && ndlData.results.bindings ? ndlData.results.bindings : [];
       
       if (ndlBindings.length === 0) {
@@ -847,7 +1521,7 @@ SELECT ?jpEntity WHERE {
         const jpUrl = `${jpsEndpoint}?query=${encodeURIComponent(jpSearchQuery)}&format=json`;
         
         try {
-          const jpData = await fetch(jpUrl).then(res => res.ok ? res.json() : null);
+          const jpData = await fetch(jpUrl, fetchOptions).then(res => res.ok ? res.json() : null);
           const hasJPSearchEntity = jpData && jpData.results && jpData.results.bindings && jpData.results.bindings.length > 0;
           
           if (hasJPSearchEntity) {
@@ -874,7 +1548,7 @@ SELECT ?jpEntity WHERE {
       };
     }
 
-    async function searchJPSearchAuthors(name, strategy) {
+    async function searchJPSearchAuthors(name, strategy, signal = null) {
       // Enhanced JPSearch author search with global authority identifiers
       const jpQuery = `
 PREFIX schema: <http://schema.org/>
@@ -896,18 +1570,141 @@ SELECT DISTINCT ?creator ?authorName ?viafId ?wikidataId ?dbpediaId WHERE {
 LIMIT 20`;
 
       const jpUrl = `${jpsEndpoint}?query=${encodeURIComponent(jpQuery)}&format=json`;
+      const fetchOptions = signal ? { signal } : {};
       
       try {
-        const jpData = await fetch(jpUrl).then(res => res.ok ? res.json() : null);
+        const jpData = await fetch(jpUrl, fetchOptions).then(res => res.ok ? res.json() : null);
         return jpData && jpData.results && jpData.results.bindings ? jpData.results.bindings : [];
       } catch (error) {
+        if (error.name === 'AbortError') throw error;
         console.error('Enhanced JPSearch author search failed:', error);
         return [];
       }
     }
 
-    async function searchKNLAuthors(name, strategy) {
+    // Simple in-memory cache for search results
+    const searchCache = new Map();
+    const CACHE_DURATION = 5 * 60 * 1000; // 5 minutes
+    const QUERY_TIMEOUT = 15000; // 15 second timeout for queries
+    
+    // Performance monitoring
+    const performanceMetrics = {
+      searchTimes: [],
+      cacheHits: 0,
+      cacheMisses: 0
+    };
+
+    // Language detection utility
+    function detectLanguage(text) {
+      if (!text || typeof text !== 'string') return 'unknown';
+      
+      text = text.trim();
+      
+      // Korean detection - Hangul characters
+      const koreanRegex = /[\uac00-\ud7af\u1100-\u11ff\u3130-\u318f]/;
+      if (koreanRegex.test(text)) {
+        return 'korean';
+      }
+      
+      // Japanese detection - Hiragana, Katakana, Kanji
+      const japaneseRegex = /[\u3040-\u309f\u30a0-\u30ff\u4e00-\u9faf]/;
+      if (japaneseRegex.test(text)) {
+        return 'japanese';
+      }
+      
+      // Chinese detection (simplified/traditional) - CJK ideographs without Japanese kana
+      const chineseRegex = /[\u4e00-\u9fff]/;
+      if (chineseRegex.test(text) && !japaneseRegex.test(text)) {
+        return 'chinese';
+      }
+      
+      // English/Latin detection
+      const latinRegex = /^[a-zA-Z\s\-\.',]+$/;
+      if (latinRegex.test(text)) {
+        return 'english';
+      }
+      
+      return 'mixed'; // Mixed or unknown script
+    }
+
+    // Detect author locale based on URI/ID patterns
+    function detectAuthorLocale(authorId) {
+      if (!authorId) return 'unknown';
+      
+      // Korean National Library
+      if (authorId.includes('lod.nl.go.kr')) {
+        return 'korean';
+      }
+      
+      // JPSearch entities (Japanese)
+      if (authorId.includes('jpsearch.go.jp')) {
+        return 'japanese';
+      }
+      
+      // NDL entities (could be Japanese or international)
+      if (authorId.includes('id.ndl.go.jp')) {
+        return 'japanese';
+      }
+      
+      // For other cases, fallback to mixed search
+      return 'mixed';
+    }
+
+    // Locale-specific endpoint configuration
+    const localeConfig = {
+      korean: {
+        endpoints: ['knl'],
+        priority: ['knl']
+      },
+      japanese: {
+        endpoints: ['jpsearch', 'ndl'],
+        priority: ['jpsearch', 'ndl']
+      },
+      english: {
+        endpoints: ['ndl', 'jpsearch'],
+        priority: ['ndl', 'jpsearch']
+      },
+      chinese: {
+        endpoints: ['ndl', 'jpsearch'],
+        priority: ['ndl', 'jpsearch']
+      },
+      mixed: {
+        endpoints: ['jpsearch', 'ndl', 'knl'],
+        priority: ['jpsearch', 'ndl', 'knl']
+      },
+      unknown: {
+        endpoints: ['jpsearch', 'ndl', 'knl'],
+        priority: ['jpsearch', 'ndl', 'knl']
+      }
+    };
+    
+    function logPerformance(operation, duration) {
+      console.log(`Performance: ${operation} took ${duration}ms`);
+      if (operation === 'search') {
+        performanceMetrics.searchTimes.push(duration);
+        // Keep only last 10 search times
+        if (performanceMetrics.searchTimes.length > 10) {
+          performanceMetrics.searchTimes.shift();
+        }
+      }
+    }
+
+    async function searchKNLAuthors(name, strategy, signal = null) {
       console.log('KNL Search Input:', name); // Debug logging
+      
+      const startTime = performance.now();
+      
+      // Check cache first
+      const cacheKey = `knl_${name}_${strategy}`;
+      const cachedResult = searchCache.get(cacheKey);
+      if (cachedResult && Date.now() - cachedResult.timestamp < CACHE_DURATION) {
+        console.log('Using cached KNL results for:', name);
+        performanceMetrics.cacheHits++;
+        logPerformance('KNL search (cached)', performance.now() - startTime);
+        return cachedResult.data;
+      }
+      
+      performanceMetrics.cacheMisses++;
       
       // Clean the search name - remove extra formatting from NDL names
       let cleanName = name;
@@ -919,66 +1716,32 @@ LIMIT 20`;
         }
       }
       
-      // Try multiple search strategies for KNL
-      const searchStrategies = [];
+      // Try multiple name variations for KNL (working patterns only)
+      const nameVariations = [];
       
-      // Strategy 1: Exact match with clean name
-      searchStrategies.push(`?label = "${cleanName}"`);
+      // Variation 1: Clean name (e.g., "유시민")
+      nameVariations.push(cleanName);
       
-      // Strategy 2: Exact match with original name  
+      // Variation 2: Original name if different
       if (cleanName !== name) {
-        searchStrategies.push(`?label = "${name}"`);
+        nameVariations.push(name);
       }
       
-      // Strategy 3: Contains clean name
-      searchStrategies.push(`CONTAINS(?label, "${cleanName}")`);
-      
-      // Strategy 4: Contains original name parts
-      if (name.includes(',')) {
-        const parts = name.split(',').map(p => p.trim()).filter(p => p && !p.match(/^\d/));
-        if (parts.length >= 2) {
-          searchStrategies.push(`(CONTAINS(?label, "${parts[0]}") && CONTAINS(?label, "${parts[1]}"))`);
-        }
-      }
-      
-      // Try each strategy until we get results
-      for (let i = 0; i < searchStrategies.length; i++) {
-        const filterCondition = searchStrategies[i];
-        console.log(`KNL Strategy ${i + 1}:`, filterCondition); // Debug logging
+      // Try each name variation until we get results (using only exact match - CONTAINS fails)
+      for (let i = 0; i < nameVariations.length; i++) {
+        const searchName = nameVariations[i];
+        console.log(`KNL Strategy ${i + 1}: Exact match for "${searchName}"`); // Debug logging
         
-        const knlQuery = `
-PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
-PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
-PREFIX nlon: <http://lod.nl.go.kr/ontology/>
-PREFIX owl: <http://www.w3.org/2002/07/owl#>
-PREFIX schema: <http://schema.org/>
-PREFIX dc: <http://purl.org/dc/elements/1.1/>
-SELECT DISTINCT ?s ?label ?jobTitle ?fieldOfActivity ?gender ?source ?associatedLanguage ?gndId ?bnfId ?dbpediaId ?locId ?ndlId WHERE { 
-    ?s rdf:type nlon:Author .
-    ?s rdfs:label ?label .
-    
-    OPTIONAL { ?s schema:jobTitle ?jobTitle }
-    OPTIONAL { ?s nlon:fieldOfActivity ?fieldOfActivity }
-    OPTIONAL { ?s schema:gender ?gender }
-    OPTIONAL { ?s dc:source ?source }
-    OPTIONAL { ?s nlon:associatedLanguage ?associatedLanguage }
-    
-    OPTIONAL { ?s owl:sameAs ?gndUri . FILTER(CONTAINS(STR(?gndUri), "d-nb.info")) BIND(?gndUri AS ?gndId) }
-    OPTIONAL { ?s owl:sameAs ?bnfUri . FILTER(CONTAINS(STR(?bnfUri), "data.bnf.fr")) BIND(?bnfUri AS ?bnfId) }
-    OPTIONAL { ?s owl:sameAs ?dbpediaUri . FILTER(CONTAINS(STR(?dbpediaUri), "dbpedia.org")) BIND(?dbpediaUri AS ?dbpediaId) }
-    OPTIONAL { ?s owl:sameAs ?locUri . FILTER(CONTAINS(STR(?locUri), "id.loc.gov")) BIND(?locUri AS ?locId) }
-    OPTIONAL { ?s owl:sameAs ?ndlUri . FILTER(CONTAINS(STR(?ndlUri), "id.ndl.go.jp")) BIND(?ndlUri AS ?ndlId) }
-    
-    FILTER(${filterCondition})
-}
-LIMIT 20`;
+        // Use the working modular query pattern (exact match only)
+        const knlQuery = SparqlQueries.knl.authorByName(searchName);
 
         // Use local CORS proxy for KNL since the endpoint doesn't support CORS
         const knlDirectUrl = `${knlEndpoint}?query=${encodeURIComponent(knlQuery)}&format=json&type=json`;
         const knlUrl = `http://localhost:8001/?url=${encodeURIComponent(knlDirectUrl)}`;
         
         try {
-          const knlData = await fetch(knlUrl).then(res => {
+          const fetchOptions = signal ? { signal } : {};
+          const knlData = await fetch(knlUrl, fetchOptions).then(res => {
             if (!res.ok) {
               if (res.status === 0 || res.status >= 500) {
                 throw new Error('KNL proxy not available');
@@ -992,13 +1755,33 @@ LIMIT 20`;
           
           if (knlData && knlData.results && knlData.results.bindings && knlData.results.bindings.length > 0) {
             console.log(`KNL Success with strategy ${i + 1}:`, knlData.results.bindings.length, 'results');
+            
+            // Cache successful results
+            searchCache.set(cacheKey, {
+              data: knlData.results.bindings,
+              timestamp: Date.now()
+            });
+            
+            logPerformance('KNL search', performance.now() - startTime);
             return knlData.results.bindings;
           }
         } catch (error) {
-          console.warn(`KNL search strategy ${i + 1} failed:`, filterCondition, error.message);
+          if (error.name === 'AbortError') {
+            console.log('KNL search cancelled');
+            throw error;
+          }
+          
+          console.warn(`KNL search strategy ${i + 1} failed for "${searchName}":`, error.message);
           if (error.message.includes('proxy not available')) {
             console.warn('KNL proxy is not running - KNL searches will be disabled');
             window.lastKNLError = error.message; // Track error state
+            
+            // Cache empty result for proxy unavailable
+            searchCache.set(cacheKey, {
+              data: [],
+              timestamp: Date.now()
+            });
+            
             return []; // Stop trying other strategies if proxy is down
           }
           // Continue to next strategy for other errors
@@ -1006,6 +1789,14 @@ LIMIT 20`;
       }
       
       console.log('KNL: No results found with any strategy');
+      
+      // Cache empty result
+      searchCache.set(cacheKey, {
+        data: [],
+        timestamp: Date.now()
+      });
+      
+      logPerformance('KNL search (no results)', performance.now() - startTime);
       return []; // No results found with any strategy
     }
 
@@ -1143,7 +1934,7 @@ WHERE {
 LIMIT 50`;
     }
 
-    function displaySearchResults(ndlBindings, jpSearchBindings, knlBindings) {
+    function displaySearchResults(ndlBindings, jpSearchBindings, knlBindings, searchMetadata = {}) {
       if (ndlBindings.length === 0 && jpSearchBindings.length === 0 && knlBindings.length === 0) {
         authorSearchResults.innerHTML = '<div style="color: #666;">No authors found.</div>';
         return;
@@ -1153,6 +1944,26 @@ LIMIT 50`;
       const mergedAuthors = mergeAuthorResults(ndlBindings, jpSearchBindings, knlBindings);
       
       authorSearchResults.innerHTML = '';
+      
+      // Show language optimization info
+      if (searchMetadata.detectedLanguage) {
+        const langInfo = document.createElement('div');
+        langInfo.style.fontSize = '0.85em';
+        langInfo.style.color = '#0066cc';
+        langInfo.style.marginBottom = '10px';
+        langInfo.style.padding = '6px';
+        langInfo.style.backgroundColor = '#e8f4fd';
+        langInfo.style.borderRadius = '4px';
+        langInfo.style.border = '1px solid #b3d9f7';
+        
+        let langText = `🌐 Language: ${searchMetadata.detectedLanguage} | Optimized search`;
+        if (searchMetadata.skippedEndpoints && searchMetadata.skippedEndpoints.length > 0) {
+          langText += ` (skipped: ${searchMetadata.skippedEndpoints.join(', ')})`;
+        }
+        
+        langInfo.textContent = langText;
+        authorSearchResults.appendChild(langInfo);
+      }
       
       // Show summary of sources at top
       const summary = document.createElement('div');
@@ -1230,19 +2041,26 @@ LIMIT 50`;
           // Make entire div clickable
           div.addEventListener('click', () => {
             radio.checked = true;
-            // Update visual state
-            form.querySelectorAll('div').forEach(d => {
-              d.style.backgroundColor = '#fff';
-              d.style.borderColor = '#ddd';
-            });
-            div.style.backgroundColor = '#e3f2fd';
-            div.style.borderColor = '#007AFF';
+            updateRadioVisualState(form, div);
           });
+          
+          // Keyboard navigation
+          div.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' || e.key === ' ') {
+              e.preventDefault();
+              radio.checked = true;
+              updateRadioVisualState(form, div);
+            }
+          });
+          
+          div.setAttribute('tabindex', '0');
+          div.setAttribute('role', 'radio');
+          div.setAttribute('aria-checked', 'false');
           
           radio.addEventListener('change', () => {
             if (radio.checked) {
-              div.style.backgroundColor = '#e3f2fd';
-              div.style.borderColor = '#007AFF';
+              updateRadioVisualState(form, div);
+              div.setAttribute('aria-checked', 'true');
             }
           });
           
@@ -1594,6 +2412,21 @@ LIMIT 50`;
         .replace(/,\s*\d{4}[\-\d]*\s*$/g, '')     // Remove trailing dates like ", 1953-"
         .replace(/[\s\-\(\)\（\）_]/g, '')          // Remove punctuation, spaces, and underscores
         .toLowerCase();
+    }
+
+    // Helper function to update radio button visual states
+    function updateRadioVisualState(form, selectedDiv) {
+      // Reset all divs
+      form.querySelectorAll('div[role="radio"]').forEach(d => {
+        d.style.backgroundColor = '#fff';
+        d.style.borderColor = '#ddd';
+        d.setAttribute('aria-checked', 'false');
+      });
+      
+      // Highlight selected div
+      selectedDiv.style.backgroundColor = '#e3f2fd';
+      selectedDiv.style.borderColor = '#007AFF';
+      selectedDiv.setAttribute('aria-checked', 'true');
     }
 
     // Function to select an author and add to dropdown
