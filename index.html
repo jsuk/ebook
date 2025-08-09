@@ -614,36 +614,59 @@ LIMIT 50
       // Clear table body
       tableBody.innerHTML = '';
 
-      // Convert and combine results
-      const allResults = [];
+      // Convert and combine results with deduplication
+      const workMap = new Map();
       
       // Process JPSearch results
       if (jpResults.bindings && jpResults.bindings.length > 0) {
         jpResults.bindings.forEach(binding => {
-          allResults.push({
+          const work = {
             published: binding.published ? binding.published.value : '',
             title: binding.title ? binding.title.value : '',
             source: 'JPSearch',
             revisions: binding.revisions ? binding.revisions.value : '',
             links: binding.links ? binding.links.value : '',
             isbns: binding.isbns ? binding.isbns.value : ''
-          });
+          };
+          
+          // Use title + publication year as deduplication key
+          const pubYear = work.published ? new Date(work.published).getFullYear() : 'unknown';
+          const dedupeKey = `${work.title}_${pubYear}`;
+          workMap.set(dedupeKey, work);
         });
       }
 
-      // Process KNL results
+      // Process KNL results - avoid duplicates with JPSearch
       if (knlResults.bindings && knlResults.bindings.length > 0) {
         knlResults.bindings.forEach(binding => {
-          allResults.push({
+          const work = {
             published: binding.issued ? binding.issued.value : '',
             title: binding.title ? binding.title.value : '',
             source: 'KNL',
             revisions: '',
             links: binding.work ? binding.work.value : '',
             isbns: binding.isbn ? binding.isbn.value : ''
-          });
+          };
+          
+          // Use title + publication year as deduplication key
+          const pubYear = work.published ? new Date(work.published).getFullYear() : 'unknown';
+          const dedupeKey = `${work.title}_${pubYear}`;
+          
+          // Only add if not already present from JPSearch
+          if (!workMap.has(dedupeKey)) {
+            workMap.set(dedupeKey, work);
+          } else {
+            // If we have the same work from both sources, merge the information
+            const existing = workMap.get(dedupeKey);
+            existing.source = 'JPSearch + KNL';
+            if (!existing.isbns && work.isbns) existing.isbns = work.isbns;
+            if (!existing.links && work.links) existing.links = work.links;
+          }
         });
       }
+      
+      // Convert to array
+      const allResults = Array.from(workMap.values());
 
       // Sort results by publication date
       allResults.sort((a, b) => {
@@ -928,9 +951,17 @@ PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
 PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
 PREFIX nlon: <http://lod.nl.go.kr/ontology/>
 PREFIX owl: <http://www.w3.org/2002/07/owl#>
-SELECT DISTINCT ?s ?label ?gndId ?bnfId ?dbpediaId ?locId ?ndlId WHERE { 
+PREFIX schema: <http://schema.org/>
+PREFIX dc: <http://purl.org/dc/elements/1.1/>
+SELECT DISTINCT ?s ?label ?jobTitle ?fieldOfActivity ?gender ?source ?associatedLanguage ?gndId ?bnfId ?dbpediaId ?locId ?ndlId WHERE { 
     ?s rdf:type nlon:Author .
     ?s rdfs:label ?label .
+    
+    OPTIONAL { ?s schema:jobTitle ?jobTitle }
+    OPTIONAL { ?s nlon:fieldOfActivity ?fieldOfActivity }
+    OPTIONAL { ?s schema:gender ?gender }
+    OPTIONAL { ?s dc:source ?source }
+    OPTIONAL { ?s nlon:associatedLanguage ?associatedLanguage }
     
     OPTIONAL { ?s owl:sameAs ?gndUri . FILTER(CONTAINS(STR(?gndUri), "d-nb.info")) BIND(?gndUri AS ?gndId) }
     OPTIONAL { ?s owl:sameAs ?bnfUri . FILTER(CONTAINS(STR(?bnfUri), "data.bnf.fr")) BIND(?bnfUri AS ?bnfId) }
@@ -957,6 +988,7 @@ LIMIT 20`;
             return res.json();
           });
           console.log(`KNL Strategy ${i + 1} Response:`, knlData); // Debug logging
+          console.log(`Sample binding for ${name}:`, knlData?.results?.bindings?.[0]); // Debug individual record
           
           if (knlData && knlData.results && knlData.results.bindings && knlData.results.bindings.length > 0) {
             console.log(`KNL Success with strategy ${i + 1}:`, knlData.results.bindings.length, 'results');
@@ -1121,21 +1153,16 @@ LIMIT 50`;
       const mergedAuthors = mergeAuthorResults(ndlBindings, jpSearchBindings, knlBindings);
       
       authorSearchResults.innerHTML = '';
-      const ul = document.createElement('ul');
       
-      mergedAuthors.forEach(author => {
-        const li = document.createElement('li');
-        createAuthorLink(li, author.preferredId, author.displayName, author.baseName);
-        ul.appendChild(li);
-      });
-      
-      authorSearchResults.appendChild(ul);
-      
-      // Show summary of sources
+      // Show summary of sources at top
       const summary = document.createElement('div');
       summary.style.fontSize = '0.9em';
       summary.style.color = '#666';
-      summary.style.marginTop = '10px';
+      summary.style.marginBottom = '15px';
+      summary.style.padding = '8px';
+      summary.style.backgroundColor = '#f8f9fa';
+      summary.style.borderRadius = '4px';
+      summary.style.border = '1px solid #dee2e6';
       
       let summaryText = `Found ${ndlBindings.length} from NDL, ${jpSearchBindings.length} from JPSearch, ${knlBindings.length} from KNL`;
       
@@ -1147,6 +1174,143 @@ LIMIT 50`;
       
       summary.textContent = summaryText;
       authorSearchResults.appendChild(summary);
+
+      // Create selection interface for multiple results
+      if (mergedAuthors.length > 1) {
+        const selectionHeader = document.createElement('h3');
+        selectionHeader.textContent = 'Select Author:';
+        selectionHeader.style.marginBottom = '10px';
+        selectionHeader.style.fontSize = '1.1em';
+        authorSearchResults.appendChild(selectionHeader);
+
+        // Create radio button selection for better UX
+        const form = document.createElement('form');
+        form.style.marginBottom = '15px';
+        
+        mergedAuthors.forEach((author, index) => {
+          const div = document.createElement('div');
+          div.style.padding = '8px';
+          div.style.margin = '4px 0';
+          div.style.borderRadius = '4px';
+          div.style.border = '1px solid #ddd';
+          div.style.backgroundColor = '#fff';
+          div.style.cursor = 'pointer';
+          div.style.transition = 'all 0.2s';
+          
+          const radio = document.createElement('input');
+          radio.type = 'radio';
+          radio.name = 'authorSelect';
+          radio.value = author.preferredId;
+          radio.id = `author_${index}`;
+          radio.style.marginRight = '8px';
+          
+          const label = document.createElement('label');
+          label.htmlFor = `author_${index}`;
+          label.textContent = author.displayName;
+          label.style.cursor = 'pointer';
+          label.style.flex = '1';
+          label.style.display = 'block';
+          
+          div.appendChild(radio);
+          div.appendChild(label);
+          
+          // Add hover effects
+          div.addEventListener('mouseenter', () => {
+            div.style.backgroundColor = '#f0f8ff';
+            div.style.borderColor = '#007AFF';
+          });
+          
+          div.addEventListener('mouseleave', () => {
+            if (!radio.checked) {
+              div.style.backgroundColor = '#fff';
+              div.style.borderColor = '#ddd';
+            }
+          });
+          
+          // Make entire div clickable
+          div.addEventListener('click', () => {
+            radio.checked = true;
+            // Update visual state
+            form.querySelectorAll('div').forEach(d => {
+              d.style.backgroundColor = '#fff';
+              d.style.borderColor = '#ddd';
+            });
+            div.style.backgroundColor = '#e3f2fd';
+            div.style.borderColor = '#007AFF';
+          });
+          
+          radio.addEventListener('change', () => {
+            if (radio.checked) {
+              div.style.backgroundColor = '#e3f2fd';
+              div.style.borderColor = '#007AFF';
+            }
+          });
+          
+          form.appendChild(div);
+        });
+        
+        // Add selection button
+        const selectButton = document.createElement('button');
+        selectButton.type = 'button';
+        selectButton.textContent = 'Select Author';
+        selectButton.style.marginTop = '10px';
+        selectButton.style.padding = '10px 20px';
+        selectButton.style.backgroundColor = '#007AFF';
+        selectButton.style.color = 'white';
+        selectButton.style.border = 'none';
+        selectButton.style.borderRadius = '6px';
+        selectButton.style.cursor = 'pointer';
+        selectButton.style.fontSize = '14px';
+        selectButton.style.fontWeight = '500';
+        
+        selectButton.addEventListener('click', () => {
+          const selected = form.querySelector('input[name="authorSelect"]:checked');
+          if (selected) {
+            const selectedAuthor = mergedAuthors.find(a => a.preferredId === selected.value);
+            if (selectedAuthor) {
+              selectAuthor(selected.value, selectedAuthor.displayName);
+            }
+          } else {
+            alert('Please select an author first.');
+          }
+        });
+        
+        form.appendChild(selectButton);
+        authorSearchResults.appendChild(form);
+        
+      } else if (mergedAuthors.length === 1) {
+        // Single result - show direct selection option
+        const singleResult = document.createElement('div');
+        singleResult.style.padding = '10px';
+        singleResult.style.backgroundColor = '#f0f8ff';
+        singleResult.style.border = '1px solid #007AFF';
+        singleResult.style.borderRadius = '6px';
+        singleResult.style.marginBottom = '10px';
+        
+        const author = mergedAuthors[0];
+        const authorInfo = document.createElement('div');
+        authorInfo.textContent = author.displayName;
+        authorInfo.style.marginBottom = '8px';
+        authorInfo.style.fontWeight = '500';
+        
+        const selectButton = document.createElement('button');
+        selectButton.textContent = 'Select This Author';
+        selectButton.style.padding = '8px 16px';
+        selectButton.style.backgroundColor = '#007AFF';
+        selectButton.style.color = 'white';
+        selectButton.style.border = 'none';
+        selectButton.style.borderRadius = '4px';
+        selectButton.style.cursor = 'pointer';
+        selectButton.style.fontSize = '14px';
+        
+        selectButton.addEventListener('click', () => {
+          selectAuthor(author.preferredId, author.displayName);
+        });
+        
+        singleResult.appendChild(authorInfo);
+        singleResult.appendChild(selectButton);
+        authorSearchResults.appendChild(singleResult);
+      }
       
       // Show global authority identifier matches
       if (jpSearchBindings.length > 0 || knlBindings.length > 0) {
@@ -1155,8 +1319,11 @@ LIMIT 50`;
           const globalDiv = document.createElement('div');
           globalDiv.style.fontSize = '0.85em';
           globalDiv.style.color = '#0066cc';
-          globalDiv.style.marginTop = '5px';
-          globalDiv.innerHTML = `🌐 Global IDs: ${globalLinks.join(', ')}`;
+          globalDiv.style.marginTop = '10px';
+          globalDiv.style.padding = '6px';
+          globalDiv.style.backgroundColor = '#f8f9fa';
+          globalDiv.style.borderRadius = '4px';
+          globalDiv.innerHTML = `🌐 Global Authority IDs: ${globalLinks.join(', ')}`;
           authorSearchResults.appendChild(globalDiv);
         }
       }
@@ -1227,44 +1394,72 @@ LIMIT 50`;
         }
       });
 
-      // Process KNL results - add as separate entries
-      knlBindings.forEach(binding => {
+      // Process KNL results - deduplicate by KNL URI and combine job titles
+      const knlAuthorMap = new Map();
+      
+      knlBindings.forEach((binding) => {
         const knlId = binding.s.value;
         const knlName = binding.label.value;
         const normalizedName = normalizeAuthorName(knlName);
         
-        // Check if we already have a similar author from NDL/JPSearch
-        let existingAuthor = null;
-        for (const [key, author] of authorMap.entries()) {
-          if (normalizeAuthorName(author.ndlName) === normalizedName || 
-              (author.koreanName && normalizeAuthorName(author.koreanName) === normalizedName)) {
-            existingAuthor = author;
-            break;
-          }
-        }
+        // Extract biographical information from KNL
+        const jobTitle = binding.jobTitle ? binding.jobTitle.value : null;
+        const fieldOfActivity = binding.fieldOfActivity ? binding.fieldOfActivity.value : null;
+        const gender = binding.gender ? binding.gender.value : null;
+        const source = binding.source ? binding.source.value : null;
+        const associatedLanguage = binding.associatedLanguage ? binding.associatedLanguage.value : null;
         
-        if (existingAuthor) {
-          // Link KNL to existing author
-          existingAuthor.knlId = knlId;
-          existingAuthor.knlName = knlName;
+        if (knlAuthorMap.has(knlId)) {
+          // Merge with existing entry
+          const existingAuthor = knlAuthorMap.get(knlId);
+          
+          // Combine job titles
+          const jobTitles = new Set();
+          if (existingAuthor.jobTitle) jobTitles.add(existingAuthor.jobTitle);
+          if (jobTitle) jobTitles.add(jobTitle);
+          existingAuthor.jobTitle = Array.from(jobTitles).join(', ');
+          
+          // Keep other fields (they should be the same for the same person)
+          if (!existingAuthor.fieldOfActivity && fieldOfActivity) existingAuthor.fieldOfActivity = fieldOfActivity;
+          if (!existingAuthor.gender && gender) existingAuthor.gender = gender;
+          if (!existingAuthor.source && source) existingAuthor.source = source;
+          if (!existingAuthor.associatedLanguage && associatedLanguage) existingAuthor.associatedLanguage = associatedLanguage;
+          
         } else {
-          // Add as new KNL-only author
+          // Create new KNL author entry
           const knlAuthor = {
             ndlId: null,
             ndlName: null,
             baseName: normalizedName,
-            birthDate: null,
-            deathDate: null,
+            jobTitle: jobTitle,
+            fieldOfActivity: fieldOfActivity,
+            gender: gender,
+            source: source,
+            associatedLanguage: associatedLanguage,
             transcription: null,
             koreanName: knlName,
             hasISBN: false,
             jpSearchId: null,
             knlId: knlId,
-            knlName: knlName
+            knlName: knlName,
+            // Add global authority IDs from KNL if available
+            globalIds: []
           };
           
-          authorMap.set(`knl_${knlId}`, knlAuthor);
+          // Extract global authority links
+          if (binding.gndId) knlAuthor.globalIds.push(binding.gndId.value);
+          if (binding.bnfId) knlAuthor.globalIds.push(binding.bnfId.value);
+          if (binding.dbpediaId) knlAuthor.globalIds.push(binding.dbpediaId.value);
+          if (binding.locId) knlAuthor.globalIds.push(binding.locId.value);
+          if (binding.ndlId) knlAuthor.globalIds.push(binding.ndlId.value);
+          
+          knlAuthorMap.set(knlId, knlAuthor);
         }
+      });
+      
+      // Add deduplicated KNL authors to main author map
+      knlAuthorMap.forEach((knlAuthor, knlId) => {
+        authorMap.set(`knl_${knlId.split('/').pop()}`, knlAuthor);
       });
       
       // Convert to array with display formatting
@@ -1292,8 +1487,53 @@ LIMIT 50`;
           displayName += ' 📚'; // ISBN indicator
           preferredId = author.jpSearchId;
         } else if (author.knlId && !author.ndlId) {
-          // KNL-only author
+          // KNL-only author with biographical details
           displayName = author.knlName;
+          
+          // Add human-readable distinguishing information for Korean names
+          const bioDetails = [];
+          
+          // Job title (occupation)
+          if (author.jobTitle) {
+            bioDetails.push(author.jobTitle);
+          }
+          
+          // Field of activity (more specific than job title)
+          if (author.fieldOfActivity && author.fieldOfActivity !== author.jobTitle) {
+            bioDetails.push(author.fieldOfActivity);
+          }
+          
+          // Source - often contains book titles or publication info that helps identify the person
+          if (author.source) {
+            // Extract meaningful info from source (usually book titles)
+            let sourceInfo = author.source;
+            // If it contains a book title and publisher, extract just the book title
+            const bookMatch = sourceInfo.match(/^([^,]+),?\s*\(/);
+            if (bookMatch) {
+              sourceInfo = bookMatch[1].trim();
+            }
+            // Truncate if too long
+            if (sourceInfo.length > 40) {
+              sourceInfo = sourceInfo.substring(0, 37) + '...';
+            }
+            bioDetails.push(`"${sourceInfo}"`);
+          }
+          
+          // Gender (if available and helps distinguish)
+          if (author.gender && author.gender !== '남성') { // Only show if not male (since most are male)
+            bioDetails.push(author.gender);
+          }
+          
+          // If still no meaningful distinguishing info, use KNL ID as fallback
+          if (bioDetails.length === 0) {
+            const uriPart = author.knlId.split('/').pop();
+            bioDetails.push(`ID:${uriPart}`);
+          }
+          
+          if (bioDetails.length > 0) {
+            displayName += ` (${bioDetails.join(' | ')})`;
+          }
+          
           displayName += ' 🇰🇷'; // KNL indicator
           if (author.globalIds && author.globalIds.length > 0) displayName += ' 🌐'; // Global ID indicator
           preferredId = author.knlId;
@@ -1356,33 +1596,44 @@ LIMIT 50`;
         .toLowerCase();
     }
 
-    // Helper function to create author links
+    // Function to select an author and add to dropdown
+    function selectAuthor(authorId, displayName) {
+      fetchWorks(authorId);
+      
+      // Update the author select dropdown
+      let optionExists = false;
+      for (let i = 0; i < authorSelect.options.length; i++) {
+        if (authorSelect.options[i].value === authorId) {
+          authorSelect.selectedIndex = i;
+          optionExists = true;
+          break;
+        }
+      }
+      if (!optionExists) {
+        const newOption = document.createElement('option');
+        newOption.value = authorId;
+        newOption.textContent = displayName;
+        authorSelect.prepend(newOption);
+        addAuthorToDb({ id: authorId, name: displayName });
+      }
+      authorSelect.value = authorId;
+      localStorage.setItem('lastSelectedAuthor', authorId);
+      
+      // Hide search results after selection
+      authorSearchResults.style.display = 'none';
+      
+      // Clear search input
+      authorSearchInput.value = '';
+    }
+
+    // Helper function to create author links (deprecated - use selectAuthor instead)
     function createAuthorLink(li, authorId, displayName, authorName) {
       const a = document.createElement('a');
       a.href = '#';
       a.textContent = displayName;
       a.addEventListener('click', (e) => {
         e.preventDefault();
-        fetchWorks(authorId);
-        
-        // Update the author select dropdown
-        let optionExists = false;
-        for (let i = 0; i < authorSelect.options.length; i++) {
-          if (authorSelect.options[i].value === authorId) {
-            authorSelect.selectedIndex = i;
-            optionExists = true;
-            break;
-          }
-        }
-        if (!optionExists) {
-          const newOption = document.createElement('option');
-          newOption.value = authorId;
-          newOption.textContent = displayName;
-          authorSelect.prepend(newOption);
-          addAuthorToDb({ id: authorId, name: displayName });
-        }
-        authorSelect.value = authorId;
-        localStorage.setItem('lastSelectedAuthor', authorId);
+        selectAuthor(authorId, displayName);
       });
       li.appendChild(a);
     }
