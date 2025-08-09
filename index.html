@@ -243,6 +243,8 @@ a:hover {
       <label for="author-select">Select Author:</label>
       <select id="author-select">
         <option value="https://jpsearch.go.jp/entity/chname/柄谷行人">Karatani Kojin</option>
+        <option value="http://lod.nl.go.kr/resource/KAC200203105">Karatani Kojin (KNL)</option>
+        <option value="http://lod.nl.go.kr/resource/KAC201116642">Yoo Simin (KNL)</option>
         <option value="http://id.ndl.go.jp/auth/entity/00138697">Chon Kyongmo</option>
         <option value="http://id.ndl.go.jp/auth/entity/00097630">Yoshimoto Takaaki</option>
         <option value="http://id.ndl.go.jp/auth/entity/001225192">Ryu Shimin</option>
@@ -265,7 +267,7 @@ a:hover {
     
     <div id="author-search-results" class="search-results" style="display: none;"></div>
     
-    <p>This table displays works by the selected author, based on a live SPARQL query to <a href="https://jpsearch.go.jp/">JPSearch</a>.</p>
+    <p>This table displays works by the selected author, based on live SPARQL queries to <a href="https://jpsearch.go.jp/">JPSearch</a> and <a href="https://lod.nl.go.kr/">Korean National Library</a>.</p>
     
     <div class="table-container">
       <table id="results-table">
@@ -279,6 +281,7 @@ a:hover {
         </tbody>
       </table>
     </div>
+
   </div>
   <div id="error-container" style="display: none; color: red; background-color: #ffebeb; border: 1px solid red; padding: 10px; margin-top: 20px;">
     <h2>JavaScript Error</h2>
@@ -294,6 +297,7 @@ a:hover {
 
     const jpsEndpoint = 'https://jpsearch.go.jp/rdf/sparql';
     const ndlEndpoint = 'https://id.ndl.go.jp/auth/ndla/sparql';
+    const knlEndpoint = 'https://lod.nl.go.kr/sparql';
     const tableHead = document.querySelector('#results-table thead tr');
     const tableBody = document.querySelector('#results-table tbody');
     const authorSelect = document.getElementById('author-select');
@@ -437,7 +441,27 @@ a:hover {
       }
     });
 
-    function fetchWorks(authorId) {
+    async function fetchWorks(authorId) {
+      // Clear previous results and show loading message
+      tableHead.innerHTML = '';
+      tableBody.innerHTML = '<tr><td colspan="6">Loading...</td></tr>';
+
+      try {
+        // Fetch from both JPSearch and KNL concurrently
+        const [jpResults, knlResults] = await Promise.all([
+          fetchJPSearchWorks(authorId),
+          fetchKNLWorks(authorId)
+        ]);
+
+        // Union and display results
+        displayUnifiedResults(jpResults, knlResults);
+      } catch (e) {
+        console.error('Error fetching works:', e);
+        tableBody.innerHTML = `<tr><td colspan="6" style="text-align: center; color: red;">Error loading data: ${e.message}</td></tr>`;
+      }
+    }
+
+    function fetchJPSearchWorks(authorId) {
       const sparqlQuery = `
 PREFIX chname: <https://jpsearch.go.jp/entity/chname/>
 PREFIX owl: <http://www.w3.org/2002/07/owl#>
@@ -464,119 +488,206 @@ select DISTINCT ?s ?o ?d ?isbn where {
       schema:datePublished ?d .
       OPTIONAL { ?s schema:isbn ?isbn }
      }
-     #union
-     #{
-     # <${authorId}> owl:sameAs ?auth.
-     # ?s schema:creator ?auth;
-     # rdfs:label ?o;
-     # schema:datePublished ?d 
-     #}
 }
 order by ?d ?o
 }
 }
-#group by ?title
 order by ?revisions ?published ?title
 `;
 
       const url = `${jpsEndpoint}?query=${encodeURIComponent(sparqlQuery)}&format=json`;
 
-      // Clear previous results and show loading message
-      tableHead.innerHTML = '';
-      tableBody.innerHTML = '<tr><td colspan="5">Loading...</td></tr>';
-
-      fetch(url)
+      return fetch(url)
         .then(res => {
           if (!res.ok) {
-            throw new Error(`HTTP error! status: ${res.status}`);
+            throw new Error(`JPSearch HTTP error! status: ${res.status}`);
           }
           return res.json();
         })
-      .then(data => {
-        tableBody.innerHTML = ''; // Clear loading message
-        const vars = data.head.vars;
-        // Populate headers
-        vars.forEach(v => {
-          const th = document.createElement('th');
-          th.textContent = v;
-          tableHead.appendChild(th);
+        .then(data => ({
+          source: 'JPSearch',
+          bindings: data.results ? data.results.bindings : [],
+          vars: data.head ? data.head.vars : []
+        }))
+        .catch(e => {
+          console.error('JPSearch error:', e);
+          return { source: 'JPSearch', bindings: [], vars: [], error: e.message };
         });
+    }
 
-        // Populate rows
-        const bindings = data.results.bindings;
-        if (bindings.length === 0) {
-            const row = document.createElement('tr');
-            const cell = document.createElement('td');
-            cell.textContent = 'No results found.';
-            cell.colSpan = vars.length;
-            row.appendChild(cell);
-            tableBody.appendChild(row);
-            return;
-        }
+    function fetchKNLWorks(authorId) {
+      // Check if this is a KNL author URI
+      let knlAuthorId = authorId;
+      
+      if (!authorId.startsWith('http://lod.nl.go.kr/')) {
+        // If it's not a KNL URI, return empty results for non-KNL authors
+        return Promise.resolve({ source: 'KNL', bindings: [], vars: [] });
+      }
 
-        bindings.forEach(binding => {
-          const row = document.createElement('tr');
-          vars.forEach(v => {
-            const cell = document.createElement('td');
-            const value = binding[v] ? binding[v].value : '';
-            // Check if the value is a URL and make it a link
-	    // split value by newline for revisions, links, and isbns
-	    if (v === 'revisions' || v === 'links' || v === 'isbns') {
-	      const values = value.split(',').filter(val => val.trim() !== '');
-	      if (values.length > 0) {
-	        const list = document.createElement('ul');
-	        values.forEach(val => {
-		  const listItem = document.createElement('li');
-		  if (val.startsWith('http')) {
-		    const a = document.createElement('a');
-		    a.href = val;
-		    a.textContent = val;
-		    a.target = '_blank'; // Open in new tab
-		    listItem.appendChild(a);
-		  } else {
-		    listItem.textContent = val;
-		  }
-		  list.appendChild(listItem);
-	        });
-	        cell.appendChild(list);
-	      } else {
-	        cell.textContent = '-';
-	      }
-	    } else
-	    // If not revisions or links, just set the text content
-	    if (v === 'published') {
-		const date = new Date(value);
-		cell.textContent = date.toLocaleDateString('ja-JP', { year: 'numeric', month: '2-digit', day: '2-digit' });
-	    }
-	    // If it's a regular value, just set the text content
-            
-            if (value.startsWith('http')) {
-                //const a = document.createElement('a');
-                //a.href = value;
-                //a.textContent = value;
-                //a.target = '_blank'; // Open in new tab
-                //cell.appendChild(a);
-            } else if (value) {
-                cell.textContent = value;
-            } else {
-                cell.textContent = '-';
-            }
-            row.appendChild(cell);
+      const sparqlQuery = `
+PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+PREFIX dcterms: <http://purl.org/dc/terms/> 
+PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+PREFIX nlon: <http://lod.nl.go.kr/ontology/>
+PREFIX bibo: <http://purl.org/ontology/bibo/>
+SELECT ?work ?title ?issued ?isbn WHERE { 
+    ?work dcterms:creator <${knlAuthorId}> ;
+          dcterms:title ?title ;
+          dcterms:issued ?issued .
+    OPTIONAL { ?work bibo:isbn ?isbn }
+}
+ORDER BY ?issued ?title
+LIMIT 50
+`;
+
+      // Use local CORS proxy for KNL since the endpoint doesn't support CORS
+      const knlDirectUrl = `${knlEndpoint}?query=${encodeURIComponent(sparqlQuery)}&format=json&type=json`;
+      const url = `http://localhost:8001/?url=${encodeURIComponent(knlDirectUrl)}`;
+
+      return fetch(url)
+        .then(res => {
+          if (!res.ok) {
+            throw new Error(`KNL HTTP error! status: ${res.status}`);
+          }
+          return res.json();
+        })
+        .then(data => ({
+          source: 'KNL',
+          bindings: data.results ? data.results.bindings : [],
+          vars: data.head ? data.head.vars : []
+        }))
+        .catch(e => {
+          console.error('KNL error:', e);
+          return { source: 'KNL', bindings: [], vars: [], error: e.message };
+        });
+    }
+
+    function displayUnifiedResults(jpResults, knlResults) {
+      // Create unified headers: published, title, source, revisions, links, isbns
+      const unifiedHeaders = ['published', 'title', 'source', 'revisions', 'links', 'isbns'];
+      
+      // Clear and populate headers
+      tableHead.innerHTML = '';
+      unifiedHeaders.forEach(header => {
+        const th = document.createElement('th');
+        th.textContent = header;
+        tableHead.appendChild(th);
+      });
+
+      // Clear table body
+      tableBody.innerHTML = '';
+
+      // Convert and combine results
+      const allResults = [];
+      
+      // Process JPSearch results
+      if (jpResults.bindings && jpResults.bindings.length > 0) {
+        jpResults.bindings.forEach(binding => {
+          allResults.push({
+            published: binding.published ? binding.published.value : '',
+            title: binding.title ? binding.title.value : '',
+            source: 'JPSearch',
+            revisions: binding.revisions ? binding.revisions.value : '',
+            links: binding.links ? binding.links.value : '',
+            isbns: binding.isbns ? binding.isbns.value : ''
           });
-          tableBody.appendChild(row);
         });
-      })
-      .catch(e => {
-          console.error('Error fetching or parsing data:', e);
-          tableBody.innerHTML = `<tr><td colspan="4" style="text-align: center; color: red;">Error loading data: ${e.message}</td></tr>`;
+      }
+
+      // Process KNL results
+      if (knlResults.bindings && knlResults.bindings.length > 0) {
+        knlResults.bindings.forEach(binding => {
+          allResults.push({
+            published: binding.issued ? binding.issued.value : '',
+            title: binding.title ? binding.title.value : '',
+            source: 'KNL',
+            revisions: '',
+            links: binding.work ? binding.work.value : '',
+            isbns: binding.isbn ? binding.isbn.value : ''
+          });
         });
+      }
+
+      // Sort results by publication date
+      allResults.sort((a, b) => {
+        const dateA = new Date(a.published || '0000');
+        const dateB = new Date(b.published || '0000');
+        return dateA - dateB;
+      });
+
+      // Display results
+      if (allResults.length === 0) {
+        const row = document.createElement('tr');
+        const cell = document.createElement('td');
+        cell.textContent = 'No results found in either JPSearch or KNL.';
+        cell.colSpan = unifiedHeaders.length;
+        row.appendChild(cell);
+        tableBody.appendChild(row);
+        return;
+      }
+
+      allResults.forEach(result => {
+        const row = document.createElement('tr');
+        
+        unifiedHeaders.forEach(header => {
+          const cell = document.createElement('td');
+          const value = result[header] || '';
+          
+          if (header === 'published' && value) {
+            const date = new Date(value);
+            cell.textContent = date.toLocaleDateString('ja-JP', { year: 'numeric', month: '2-digit', day: '2-digit' });
+          } else if (header === 'revisions' || header === 'links' || header === 'isbns') {
+            const values = value.split(',').filter(val => val.trim() !== '');
+            if (values.length > 0) {
+              const list = document.createElement('ul');
+              values.forEach(val => {
+                const listItem = document.createElement('li');
+                if (val.startsWith('http')) {
+                  const a = document.createElement('a');
+                  a.href = val;
+                  a.textContent = val;
+                  a.target = '_blank';
+                  listItem.appendChild(a);
+                } else {
+                  listItem.textContent = val;
+                }
+                list.appendChild(listItem);
+              });
+              cell.appendChild(list);
+            } else {
+              cell.textContent = '-';
+            }
+          } else if (header === 'source') {
+            // Add visual indicator for source
+            cell.textContent = value;
+            if (value === 'KNL') {
+              cell.style.backgroundColor = '#e3f2fd';
+              cell.style.fontWeight = 'bold';
+            } else if (value === 'JPSearch') {
+              cell.style.backgroundColor = '#f3e5f5';
+              cell.style.fontWeight = 'bold';
+            }
+          } else {
+            cell.textContent = value || '-';
+          }
+          
+          row.appendChild(cell);
+        });
+        
+        tableBody.appendChild(row);
+      });
+
+      // Show summary
+      const summaryMessage = `Found ${jpResults.bindings ? jpResults.bindings.length : 0} results from JPSearch and ${knlResults.bindings ? knlResults.bindings.length : 0} results from KNL (${allResults.length} total)`;
+      console.log(summaryMessage);
     }
 
     
 
     // Add event listener for author selection change
     authorSelect.addEventListener('change', (event) => {
-      fetchWorks(event.target.value);
+      const authorId = event.target.value;
+      fetchWorks(authorId);
       localStorage.setItem('lastSelectedAuthor', event.target.value);
     });
 
@@ -597,7 +708,7 @@ order by ?revisions ?published ?title
 
       // Try AND search first, then fallback to OR if no results
       searchAuthorsWithStrategy(name, 'AND').then(results => {
-        if (results.ndlBindings.length === 0 && results.jpSearchBindings.length === 0) {
+        if (results.ndlBindings.length === 0 && results.jpSearchBindings.length === 0 && results.knlBindings.length === 0) {
           // No results with AND, try OR strategy
           console.log('No exact matches found, searching for partial matches...');
           authorSearchResults.innerHTML = '<div class="loading">No exact matches found, searching for partial matches...</div>';
@@ -605,7 +716,7 @@ order by ?revisions ?published ?title
         }
         return results;
       }).then(results => {
-        displaySearchResults(results.ndlBindings, results.jpSearchBindings);
+        displaySearchResults(results.ndlBindings, results.jpSearchBindings, results.knlBindings);
       }).catch(e => {
         console.error('Error searching authors:', e);
         authorSearchResults.innerHTML = `<div style="color: #FF3B30; padding: 1rem; background-color: #ffebeb; border-radius: 8px; border: 1px solid #FF3B30;">Error searching authors: ${e.message}</div>`;
@@ -613,6 +724,45 @@ order by ?revisions ?published ?title
     }
 
     async function searchAuthorsWithStrategy(name, strategy) {
+      console.log('Starting search for:', name, 'strategy:', strategy);
+      
+      // Search all three sources concurrently
+      try {
+        const [ndlResults, jpSearchResults, knlResults] = await Promise.all([
+          searchNDLAuthors(name, strategy),
+          searchJPSearchAuthors(name, strategy), 
+          searchKNLAuthors(name, strategy)
+        ]);
+        
+        console.log('Search results summary:', {
+          ndl: ndlResults.ndlBindings ? ndlResults.ndlBindings.length : 0,
+          jpFromNDL: ndlResults.jpSearchBindings ? ndlResults.jpSearchBindings.length : 0, 
+          jpDirect: jpSearchResults ? jpSearchResults.length : 0,
+          knl: knlResults ? knlResults.length : 0
+        });
+        
+        // Combine JPSearch results from NDL linkage and direct search
+        const allJPSearchBindings = [
+          ...(ndlResults.jpSearchBindings || []),
+          ...(jpSearchResults || [])
+        ];
+        
+        return {
+          ndlBindings: ndlResults.ndlBindings || [],
+          jpSearchBindings: allJPSearchBindings,
+          knlBindings: knlResults || []
+        };
+      } catch (error) {
+        console.error('Error in searchAuthorsWithStrategy:', error);
+        return {
+          ndlBindings: [],
+          jpSearchBindings: [],
+          knlBindings: []
+        };
+      }
+    }
+
+    async function searchNDLAuthors(name, strategy) {
       // Step 1: Search NDL for author entities with all name variants
       const ndlQuery = buildNDLQuery(name, strategy);
       const ndlUrl = `${ndlEndpoint}?query=${encodeURIComponent(ndlQuery)}&format=json`;
@@ -662,6 +812,93 @@ SELECT ?jpEntity WHERE {
         ndlBindings: ndlBindings,
         jpSearchBindings: jpSearchBindings
       };
+    }
+
+    async function searchJPSearchAuthors(name, strategy) {
+      // Direct JPSearch author search (separate from NDL-linked ones)
+      const jpQuery = buildJPSearchQuery(name, strategy);
+      const jpUrl = `${jpsEndpoint}?query=${encodeURIComponent(jpQuery)}&format=json`;
+      
+      try {
+        const jpData = await fetch(jpUrl).then(res => res.ok ? res.json() : null);
+        return jpData && jpData.results && jpData.results.bindings ? jpData.results.bindings : [];
+      } catch (error) {
+        console.error('Direct JPSearch author search failed:', error);
+        return [];
+      }
+    }
+
+    async function searchKNLAuthors(name, strategy) {
+      console.log('KNL Search Input:', name); // Debug logging
+      
+      // Clean the search name - remove extra formatting from NDL names
+      let cleanName = name;
+      if (name.includes(',')) {
+        // If it's a formatted name like "유, 시민, 1959-", extract just the name parts
+        const parts = name.split(',').map(p => p.trim());
+        if (parts.length >= 2) {
+          cleanName = parts[0] + parts[1]; // "유시민"
+        }
+      }
+      
+      // Try multiple search strategies for KNL
+      const searchStrategies = [];
+      
+      // Strategy 1: Exact match with clean name
+      searchStrategies.push(`?label = "${cleanName}"`);
+      
+      // Strategy 2: Exact match with original name  
+      if (cleanName !== name) {
+        searchStrategies.push(`?label = "${name}"`);
+      }
+      
+      // Strategy 3: Contains clean name
+      searchStrategies.push(`CONTAINS(?label, "${cleanName}")`);
+      
+      // Strategy 4: Contains original name parts
+      if (name.includes(',')) {
+        const parts = name.split(',').map(p => p.trim()).filter(p => p && !p.match(/^\d/));
+        if (parts.length >= 2) {
+          searchStrategies.push(`(CONTAINS(?label, "${parts[0]}") && CONTAINS(?label, "${parts[1]}"))`);
+        }
+      }
+      
+      // Try each strategy until we get results
+      for (let i = 0; i < searchStrategies.length; i++) {
+        const filterCondition = searchStrategies[i];
+        console.log(`KNL Strategy ${i + 1}:`, filterCondition); // Debug logging
+        
+        const knlQuery = `
+PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+PREFIX nlon: <http://lod.nl.go.kr/ontology/>
+SELECT DISTINCT ?s ?label WHERE { 
+    ?s rdf:type nlon:Author .
+    ?s rdfs:label ?label .
+    FILTER(${filterCondition})
+}
+LIMIT 20`;
+
+        // Use local CORS proxy for KNL since the endpoint doesn't support CORS
+        const knlDirectUrl = `${knlEndpoint}?query=${encodeURIComponent(knlQuery)}&format=json&type=json`;
+        const knlUrl = `http://localhost:8001/?url=${encodeURIComponent(knlDirectUrl)}`;
+        
+        try {
+          const knlData = await fetch(knlUrl).then(res => res.ok ? res.json() : null);
+          console.log(`KNL Strategy ${i + 1} Response:`, knlData); // Debug logging
+          
+          if (knlData && knlData.results && knlData.results.bindings && knlData.results.bindings.length > 0) {
+            console.log(`KNL Success with strategy ${i + 1}:`, knlData.results.bindings.length, 'results');
+            return knlData.results.bindings;
+          }
+        } catch (error) {
+          console.error(`KNL search strategy ${i + 1} failed:`, filterCondition, error);
+          // Continue to next strategy
+        }
+      }
+      
+      console.log('KNL: No results found with any strategy');
+      return []; // No results found with any strategy
     }
 
     function buildJPSearchQuery(name, strategy) {
@@ -798,14 +1035,14 @@ WHERE {
 LIMIT 50`;
     }
 
-    function displaySearchResults(ndlBindings, jpSearchBindings) {
-      if (ndlBindings.length === 0 && jpSearchBindings.length === 0) {
+    function displaySearchResults(ndlBindings, jpSearchBindings, knlBindings) {
+      if (ndlBindings.length === 0 && jpSearchBindings.length === 0 && knlBindings.length === 0) {
         authorSearchResults.innerHTML = '<div style="color: #666;">No authors found.</div>';
         return;
       }
       
-      // Merge and deduplicate authors
-      const mergedAuthors = mergeAuthorResults(ndlBindings, jpSearchBindings);
+      // Merge and deduplicate authors from all sources
+      const mergedAuthors = mergeAuthorResults(ndlBindings, jpSearchBindings, knlBindings);
       
       authorSearchResults.innerHTML = '';
       const ul = document.createElement('ul');
@@ -817,10 +1054,18 @@ LIMIT 50`;
       });
       
       authorSearchResults.appendChild(ul);
+      
+      // Show summary of sources
+      const summary = document.createElement('div');
+      summary.style.fontSize = '0.9em';
+      summary.style.color = '#666';
+      summary.style.marginTop = '10px';
+      summary.textContent = `Found ${ndlBindings.length} from NDL, ${jpSearchBindings.length} from JPSearch, ${knlBindings.length} from KNL`;
+      authorSearchResults.appendChild(summary);
     }
 
     // Function to merge and deduplicate author results
-    function mergeAuthorResults(ndlBindings, jpSearchBindings) {
+    function mergeAuthorResults(ndlBindings, jpSearchBindings, knlBindings) {
       const authorMap = new Map();
       
       // Process NDL results first
@@ -841,7 +1086,8 @@ LIMIT 50`;
           transcription: transcription,
           koreanName: koreanName,
           hasISBN: false,
-          jpSearchId: null
+          jpSearchId: null,
+          knlId: null
         };
         
         authorMap.set(authorId, author);
@@ -858,6 +1104,46 @@ LIMIT 50`;
           existing.jpSearchId = binding.creator.value;
         } else {
           // This case should not happen if the logic in searchAuthorsWithStrategy is correct
+        }
+      });
+
+      // Process KNL results - add as separate entries
+      knlBindings.forEach(binding => {
+        const knlId = binding.s.value;
+        const knlName = binding.label.value;
+        const normalizedName = normalizeAuthorName(knlName);
+        
+        // Check if we already have a similar author from NDL/JPSearch
+        let existingAuthor = null;
+        for (const [key, author] of authorMap.entries()) {
+          if (normalizeAuthorName(author.ndlName) === normalizedName || 
+              (author.koreanName && normalizeAuthorName(author.koreanName) === normalizedName)) {
+            existingAuthor = author;
+            break;
+          }
+        }
+        
+        if (existingAuthor) {
+          // Link KNL to existing author
+          existingAuthor.knlId = knlId;
+          existingAuthor.knlName = knlName;
+        } else {
+          // Add as new KNL-only author
+          const knlAuthor = {
+            ndlId: null,
+            ndlName: null,
+            baseName: normalizedName,
+            birthDate: null,
+            deathDate: null,
+            transcription: null,
+            koreanName: knlName,
+            hasISBN: false,
+            jpSearchId: null,
+            knlId: knlId,
+            knlName: knlName
+          };
+          
+          authorMap.set(`knl_${knlId}`, knlAuthor);
         }
       });
       
@@ -881,10 +1167,16 @@ LIMIT 50`;
           if (author.transcription) displayName += ` / ${author.transcription}`;
           if (author.birthDate) displayName += ` (${author.birthDate})`;
           if (author.deathDate) displayName += ` - ${author.deathDate}`;
+          if (author.knlId) displayName += ' 🇰🇷'; // KNL indicator
           displayName += ' 📚'; // ISBN indicator
           preferredId = author.jpSearchId;
+        } else if (author.knlId && !author.ndlId) {
+          // KNL-only author
+          displayName = author.knlName;
+          displayName += ' 🇰🇷'; // KNL indicator
+          preferredId = author.knlId;
         } else {
-          // No ISBN version available
+          // NDL-only author
           displayName = author.ndlName;
           
           // Parse and display name components
@@ -899,6 +1191,7 @@ LIMIT 50`;
           if (author.transcription) displayName += ` / ${author.transcription}`;
           if (author.birthDate) displayName += ` (${author.birthDate})`;
           if (author.deathDate) displayName += ` - ${author.deathDate}`;
+          if (author.knlId) displayName += ' 🇰🇷'; // KNL indicator
           preferredId = author.ndlId;
         }
         
@@ -906,7 +1199,8 @@ LIMIT 50`;
           preferredId: preferredId,
           displayName: displayName,
           baseName: author.baseName,
-          hasISBN: author.hasISBN
+          hasISBN: author.hasISBN,
+          hasKNL: !!author.knlId
         };
       });
     }
