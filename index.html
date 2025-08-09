@@ -242,7 +242,7 @@
     <div class="form-group">
       <label for="author-select">Select Author:</label>
       <select id="author-select">
-        <option value="http://id.ndl.go.jp/auth/entity/00026849">Karatani Kojin</option>
+        <option value="https://jpsearch.go.jp/entity/chname/柄谷行人">Karatani Kojin</option>
         <option value="http://id.ndl.go.jp/auth/entity/00138697">Chon Kyongmo</option>
         <option value="http://id.ndl.go.jp/auth/entity/00097630">Yoshimoto Takaaki</option>
         <option value="http://id.ndl.go.jp/auth/entity/001225192">Ryu Shimin</option>
@@ -445,15 +445,24 @@ PREFIX schema: <http://schema.org/>
 SELECT
 min(?d) as ?published
 ?o as ?title
-GROUP_CONCAT(?d; separator="\\n") as ?revisions
-group_concat(?s; separator="\\n") AS ?links
+GROUP_CONCAT(DISTINCT ?d; separator="\\n") as ?revisions
+group_concat(DISTINCT ?s; separator="\\n") AS ?links
+group_concat(DISTINCT ?isbn; separator="\\n") AS ?isbns
 WHERE {
 {
-select * where {
+select DISTINCT ?s ?o ?d ?isbn where {
      {
       ?s ?p <${authorId}>;
       rdfs:label ?o;
-      schema:datePublished ?d 
+      schema:datePublished ?d .
+      OPTIONAL { ?s schema:isbn ?isbn }
+     }
+     UNION
+     {
+      ?s schema:creator <${authorId}>;
+      rdfs:label ?o;
+      schema:datePublished ?d .
+      OPTIONAL { ?s schema:isbn ?isbn }
      }
      #union
      #{
@@ -474,7 +483,7 @@ order by ?revisions ?published ?title
 
       // Clear previous results and show loading message
       tableHead.innerHTML = '';
-      tableBody.innerHTML = '<tr><td colspan="4">Loading...</td></tr>';
+      tableBody.innerHTML = '<tr><td colspan="5">Loading...</td></tr>';
 
       fetch(url)
         .then(res => {
@@ -511,24 +520,28 @@ order by ?revisions ?published ?title
             const cell = document.createElement('td');
             const value = binding[v] ? binding[v].value : '';
             // Check if the value is a URL and make it a link
-	    // split value by newline for revisions and links
-	    if (v === 'revisions' || v === 'links') {
-	      const values = value.split('\n');
-	      const list = document.createElement('ul');
-	      values.forEach(val => {
-		const listItem = document.createElement('li');
-		if (val.startsWith('http')) {
-		  const a = document.createElement('a');
-		  a.href = val;
-		  a.textContent = val;
-		  a.target = '_blank'; // Open in new tab
-		  listItem.appendChild(a);
-		} else {
-		  listItem.textContent = val;
-		}
-		list.appendChild(listItem);
-	      });
-	      cell.appendChild(list);
+	    // split value by newline for revisions, links, and isbns
+	    if (v === 'revisions' || v === 'links' || v === 'isbns') {
+	      const values = value.split('\n').filter(val => val.trim() !== '');
+	      if (values.length > 0) {
+	        const list = document.createElement('ul');
+	        values.forEach(val => {
+		  const listItem = document.createElement('li');
+		  if (val.startsWith('http')) {
+		    const a = document.createElement('a');
+		    a.href = val;
+		    a.textContent = val;
+		    a.target = '_blank'; // Open in new tab
+		    listItem.appendChild(a);
+		  } else {
+		    listItem.textContent = val;
+		  }
+		  list.appendChild(listItem);
+	        });
+	        cell.appendChild(list);
+	      } else {
+	        cell.textContent = '-';
+	      }
 	    } else
 	    // If not revisions or links, just set the text content
 	    if (v === 'published') {
@@ -543,8 +556,10 @@ order by ?revisions ?published ?title
                 //a.textContent = value;
                 //a.target = '_blank'; // Open in new tab
                 //cell.appendChild(a);
-            } else {
+            } else if (value) {
                 cell.textContent = value;
+            } else {
+                cell.textContent = '-';
             }
             row.appendChild(cell);
           });
@@ -577,12 +592,33 @@ order by ?revisions ?published ?title
     });
 
     function searchAuthors(name) {
-      const sparqlQuery = `
+      authorSearchResults.style.display = 'block';
+      authorSearchResults.innerHTML = '<div class="loading">Searching authors...</div>';
+
+      // Try AND search first, then fallback to OR if no results
+      searchAuthorsWithStrategy(name, 'AND').then(results => {
+        if (results.ndlBindings.length === 0 && results.jpSearchBindings.length === 0) {
+          // No results with AND, try OR strategy
+          console.log('No exact matches found, searching for partial matches...');
+          authorSearchResults.innerHTML = '<div class="loading">No exact matches found, searching for partial matches...</div>';
+          return searchAuthorsWithStrategy(name, 'OR');
+        }
+        return results;
+      }).then(results => {
+        displaySearchResults(results.ndlBindings, results.jpSearchBindings);
+      }).catch(e => {
+        console.error('Error searching authors:', e);
+        authorSearchResults.innerHTML = `<div style="color: #FF3B30; padding: 1rem; background-color: #ffebeb; border-radius: 8px; border: 1px solid #FF3B30;">Error searching authors: ${e.message}</div>`;
+      });
+    }
+
+    async function searchAuthorsWithStrategy(name, strategy) {
+      // Search both NDL and JPSearch databases in parallel
+      const ndlQuery = `
 PREFIX foaf: <http://xmlns.com/foaf/0.1/>
 PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
 PREFIX schema: <http://schema.org/>
 PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
-PREFIX xl: <http://www.w3.org/2008/05/skos-xl#>
 
 SELECT ?s ?name ?label ?birthDate ?deathDate
 WHERE {
@@ -594,72 +630,214 @@ WHERE {
   OPTIONAL { ?ndlna rdfs:label ?label. }
   FILTER regex(?name, "${name}", "i")
 }
-LIMIT 100
-`;
+LIMIT 50`;
 
-      const url = `${ndlEndpoint}?query=${encodeURIComponent(sparqlQuery)}&format=json`;
+      // Build JPSearch query based on strategy
+      const jpSearchQuery = buildJPSearchQuery(name, strategy);
 
-      authorSearchResults.style.display = 'block';
-      authorSearchResults.innerHTML = '<div class="loading">Searching authors...</div>';
+      const ndlUrl = `${ndlEndpoint}?query=${encodeURIComponent(ndlQuery)}&format=json`;
+      const jpSearchUrl = `${jpsEndpoint}?query=${encodeURIComponent(jpSearchQuery)}&format=json`;
 
-      fetch(url)
-        .then(res => {
-          if (!res.ok) {
-            throw new Error(`HTTP error! status: ${res.status}`);
+      const [ndlData, jpSearchData] = await Promise.all([
+        fetch(ndlUrl).then(res => res.ok ? res.json() : Promise.reject(new Error(`NDL query failed: ${res.status}`))),
+        fetch(jpSearchUrl).then(res => res.ok ? res.json() : Promise.reject(new Error(`JPSearch query failed: ${res.status}`)))
+      ]);
+
+      return {
+        ndlBindings: ndlData.results && ndlData.results.bindings ? ndlData.results.bindings : [],
+        jpSearchBindings: jpSearchData.results && jpSearchData.results.bindings ? jpSearchData.results.bindings : []
+      };
+    }
+
+    function buildJPSearchQuery(name, strategy) {
+      const searchWords = name.toLowerCase().split(/\s+/).filter(w => w.length > 0);
+      
+      if (searchWords.length <= 1) {
+        // Single word - use simple search
+        const searchFilters = `CONTAINS(LCASE(?authorName), "${searchWords[0]}") || ` +
+          `CONTAINS(LCASE(REPLACE(?authorName, "_", " ")), "${searchWords[0]}") || ` +
+          `CONTAINS(LCASE(REPLACE(?authorName, ",_", ", ")), "${searchWords[0]}")`;
+        
+        return `
+PREFIX schema: <http://schema.org/>
+PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+
+SELECT DISTINCT ?creator ?authorName
+WHERE {
+  ?s schema:creator ?creator ;
+     schema:isbn ?isbn .
+  BIND(REPLACE(STR(?creator), ".*/", "") AS ?authorName)
+  FILTER(${searchFilters})
+}
+LIMIT 20`;
+      }
+
+      // Multi-word search with AND/OR strategy
+      const wordFilters = searchWords.map(word => 
+        `(CONTAINS(LCASE(?authorName), "${word}") || ` +
+        `CONTAINS(LCASE(REPLACE(?authorName, "_", " ")), "${word}") || ` +
+        `CONTAINS(LCASE(REPLACE(?authorName, ",_", ", ")), "${word}"))`
+      );
+
+      const joinOperator = strategy === 'AND' ? ' && ' : ' || ';
+      const searchFilters = wordFilters.join(joinOperator);
+
+      return `
+PREFIX schema: <http://schema.org/>
+PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+
+SELECT DISTINCT ?creator ?authorName
+WHERE {
+  ?s schema:creator ?creator ;
+     schema:isbn ?isbn .
+  BIND(REPLACE(STR(?creator), ".*/", "") AS ?authorName)
+  FILTER(${searchFilters})
+}
+LIMIT 20`;
+    }
+
+    function displaySearchResults(ndlBindings, jpSearchBindings) {
+      if (ndlBindings.length === 0 && jpSearchBindings.length === 0) {
+        authorSearchResults.innerHTML = '<div style="color: #666;">No authors found.</div>';
+        return;
+      }
+      
+      // Merge and deduplicate authors
+      const mergedAuthors = mergeAuthorResults(ndlBindings, jpSearchBindings);
+      
+      authorSearchResults.innerHTML = '';
+      const ul = document.createElement('ul');
+      
+      mergedAuthors.forEach(author => {
+        const li = document.createElement('li');
+        createAuthorLink(li, author.preferredId, author.displayName, author.baseName);
+        ul.appendChild(li);
+      });
+      
+      authorSearchResults.appendChild(ul);
+    }
+
+    // Function to merge and deduplicate author results
+    function mergeAuthorResults(ndlBindings, jpSearchBindings) {
+      const authorMap = new Map();
+      
+      // Process NDL results first
+      ndlBindings.forEach(binding => {
+        const authorId = binding.s.value;
+        const authorName = binding.label.value || binding.name.value;
+        const birthDate = binding.birthDate ? binding.birthDate.value : null;
+        const deathDate = binding.deathDate ? binding.deathDate.value : null;
+        
+        // Extract base name (remove punctuation and spaces for matching)
+        const baseName = normalizeAuthorName(authorName);
+        
+        const author = {
+          ndlId: authorId,
+          ndlName: authorName,
+          baseName: baseName,
+          birthDate: birthDate,
+          deathDate: deathDate,
+          hasISBN: false,
+          jpSearchId: null
+        };
+        
+        authorMap.set(baseName, author);
+      });
+      
+      // Process JPSearch results and merge with NDL
+      jpSearchBindings.forEach(binding => {
+        const authorId = binding.creator.value;
+        const authorName = binding.authorName.value;
+        const baseName = normalizeAuthorName(authorName);
+        
+        if (authorMap.has(baseName)) {
+          // Merge with existing NDL entry
+          const existing = authorMap.get(baseName);
+          existing.hasISBN = true;
+          existing.jpSearchId = authorId;
+        } else {
+          // New author not in NDL
+          const author = {
+            ndlId: null,
+            ndlName: null,
+            baseName: baseName,
+            birthDate: null,
+            deathDate: null,
+            hasISBN: true,
+            jpSearchId: authorId,
+            jpSearchName: authorName
+          };
+          authorMap.set(baseName, author);
+        }
+      });
+      
+      // Convert to array with display formatting
+      return Array.from(authorMap.values()).map(author => {
+        let displayName, preferredId;
+        
+        if (author.hasISBN) {
+          // Prefer ISBN version, use NDL name if available for better formatting
+          displayName = author.ndlName || author.jpSearchName || author.baseName;
+          if (author.birthDate) displayName += ` (${author.birthDate})`;
+          if (author.deathDate) displayName += ` - ${author.deathDate}`;
+          displayName += ' 📚'; // ISBN indicator
+          preferredId = author.jpSearchId;
+        } else {
+          // No ISBN version available
+          displayName = author.ndlName;
+          if (author.birthDate) displayName += ` (${author.birthDate})`;
+          if (author.deathDate) displayName += ` - ${author.deathDate}`;
+          preferredId = author.ndlId;
+        }
+        
+        return {
+          preferredId: preferredId,
+          displayName: displayName,
+          baseName: author.baseName,
+          hasISBN: author.hasISBN
+        };
+      });
+    }
+    
+    // Normalize author names for matching
+    function normalizeAuthorName(name) {
+      if (!name) return '';
+      // Remove common punctuation, spaces, dates, and convert to lowercase for matching
+      return name
+        .replace(/,\s*\d{4}[\-\d]*\s*$/g, '')     // Remove trailing dates like ", 1953-"
+        .replace(/[,\s\-\(\)（）_]/g, '')          // Remove punctuation, spaces, and underscores
+        .toLowerCase();
+    }
+
+    // Helper function to create author links
+    function createAuthorLink(li, authorId, displayName, authorName) {
+      const a = document.createElement('a');
+      a.href = '#';
+      a.textContent = displayName;
+      a.addEventListener('click', (e) => {
+        e.preventDefault();
+        fetchWorks(authorId);
+        
+        // Update the author select dropdown
+        let optionExists = false;
+        for (let i = 0; i < authorSelect.options.length; i++) {
+          if (authorSelect.options[i].value === authorId) {
+            authorSelect.selectedIndex = i;
+            optionExists = true;
+            break;
           }
-          return res.json();
-        })
-        .then(data => {
-          const bindings = data.results && data.results.bindings ? data.results.bindings : [];
-          if (bindings.length === 0) {
-            authorSearchResults.innerHTML = '<div style="color: #666;">No authors found.</div>';
-            return;
-          }
-          
-          authorSearchResults.innerHTML = '';
-
-          const ul = document.createElement('ul');
-          bindings.forEach(binding => {
-            const li = document.createElement('li');
-            const authorId = binding.s.value;
-            const authorName = binding.label.value || binding.name.value;
-            const birthDate = binding.birthDate ? ` (${binding.birthDate.value})` : '';
-            const deathDate = binding.deathDate ? ` - ${binding.deathDate.value}` : '';
-            const a = document.createElement('a');
-            a.href = '#';
-            a.textContent = `${authorName}${birthDate}${deathDate}`;
-            a.addEventListener('click', (e) => {
-              e.preventDefault();
-              fetchWorks(authorId);
-              // Optionally update the author select dropdown
-              // if a matching option exists or add a new one
-              let optionExists = false;
-              for (let i = 0; i < authorSelect.options.length; i++) {
-                if (authorSelect.options[i].value === authorId) {
-                  authorSelect.selectedIndex = i;
-                  optionExists = true;
-                  break;
-                }
-              }
-              if (!optionExists) {
-                const newOption = document.createElement('option');
-                newOption.value = authorId;
-                newOption.textContent = authorName;
-                authorSelect.prepend(newOption);
-                addAuthorToDb({ id: authorId, name: authorName });
-              }
-              authorSelect.value = authorId;
-              localStorage.setItem('lastSelectedAuthor', authorId);
-            });
-            li.appendChild(a);
-            ul.appendChild(li);
-          });
-          authorSearchResults.appendChild(ul);
-        })
-        .catch(e => {
-          console.error('Error searching authors:', e);
-          authorSearchResults.innerHTML = `<div style="color: #FF3B30; padding: 1rem; background-color: #ffebeb; border-radius: 8px; border: 1px solid #FF3B30;">Error searching authors: ${e.message}</div>`;
-        });
+        }
+        if (!optionExists) {
+          const newOption = document.createElement('option');
+          newOption.value = authorId;
+          newOption.textContent = displayName;
+          authorSelect.prepend(newOption);
+          addAuthorToDb({ id: authorId, name: displayName });
+        }
+        authorSelect.value = authorId;
+        localStorage.setItem('lastSelectedAuthor', authorId);
+      });
+      li.appendChild(a);
     }
   </script>
 </body>
