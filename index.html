@@ -613,39 +613,53 @@ order by ?revisions ?published ?title
     }
 
     async function searchAuthorsWithStrategy(name, strategy) {
-      // Search both NDL and JPSearch databases in parallel
-      const ndlQuery = `
-PREFIX foaf: <http://xmlns.com/foaf/0.1/>
-PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
-PREFIX schema: <http://schema.org/>
-PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
-
-SELECT ?s ?name ?label ?birthDate ?deathDate
-WHERE {
-  ?s rdf:type foaf:Person;
-     ^foaf:primaryTopic ?ndlna;
-     foaf:name ?name.
-  OPTIONAL { ?s schema:dateOfBirth ?birthDate. }
-  OPTIONAL { ?s schema:dateOfDeath ?deathDate. }
-  OPTIONAL { ?ndlna rdfs:label ?label. }
-  FILTER regex(?name, "${name}", "i")
-}
-LIMIT 50`;
-
-      // Build JPSearch query based on strategy
-      const jpSearchQuery = buildJPSearchQuery(name, strategy);
-
+      // Step 1: Search NDL for author entities with all name variants
+      const ndlQuery = buildNDLQuery(name, strategy);
       const ndlUrl = `${ndlEndpoint}?query=${encodeURIComponent(ndlQuery)}&format=json`;
-      const jpSearchUrl = `${jpsEndpoint}?query=${encodeURIComponent(jpSearchQuery)}&format=json`;
-
-      const [ndlData, jpSearchData] = await Promise.all([
-        fetch(ndlUrl).then(res => res.ok ? res.json() : Promise.reject(new Error(`NDL query failed: ${res.status}`))),
-        fetch(jpSearchUrl).then(res => res.ok ? res.json() : Promise.reject(new Error(`JPSearch query failed: ${res.status}`)))
-      ]);
-
+      
+      const ndlData = await fetch(ndlUrl).then(res => res.ok ? res.json() : Promise.reject(new Error(`NDL query failed: ${res.status}`)));
+      const ndlBindings = ndlData.results && ndlData.results.bindings ? ndlData.results.bindings : [];
+      
+      if (ndlBindings.length === 0) {
+        return { ndlBindings: [], jpSearchBindings: [] };
+      }
+      
+      // Step 2: For each NDL author, check if they have JPSearch entity with ISBN data
+      const jpSearchPromises = ndlBindings.map(async (binding) => {
+        const ndlAuthorId = binding.s.value;
+        
+        // Query JPSearch to find entity that links back to this NDL entity
+        const jpSearchQuery = `
+SELECT ?jpEntity WHERE { 
+  ?jpEntity <http://www.w3.org/2002/07/owl#sameAs> <${ndlAuthorId}> 
+}`;
+        
+        const jpUrl = `${jpsEndpoint}?query=${encodeURIComponent(jpSearchQuery)}&format=json`;
+        
+        try {
+          const jpData = await fetch(jpUrl).then(res => res.ok ? res.json() : null);
+          const hasJPSearchEntity = jpData && jpData.results && jpData.results.bindings && jpData.results.bindings.length > 0;
+          
+          if (hasJPSearchEntity) {
+            const jpSearchURI = jpData.results.bindings[0].jpEntity.value;
+            return {
+              creator: { value: jpSearchURI },
+              authorName: { value: jpSearchURI.split('/').pop() }
+            };
+          }
+          return null;
+        } catch (error) {
+          console.error('JPSearch lookup failed for', ndlAuthorId, error);
+          return null;
+        }
+      });
+      
+      const jpSearchResults = await Promise.all(jpSearchPromises);
+      const jpSearchBindings = jpSearchResults.filter(result => result !== null);
+      
       return {
-        ndlBindings: ndlData.results && ndlData.results.bindings ? ndlData.results.bindings : [],
-        jpSearchBindings: jpSearchData.results && jpSearchData.results.bindings ? jpSearchData.results.bindings : []
+        ndlBindings: ndlBindings,
+        jpSearchBindings: jpSearchBindings
       };
     }
 
@@ -696,6 +710,75 @@ WHERE {
 LIMIT 20`;
     }
 
+    function buildNDLQuery(name, strategy) {
+      const searchWords = name.toLowerCase().split(/\s+/).filter(w => w.length > 0);
+      
+      if (searchWords.length <= 1) {
+        // Single word search
+        return `
+PREFIX foaf: <http://xmlns.com/foaf/0.1/>
+PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+PREFIX schema: <http://schema.org/>
+PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+PREFIX skosxl: <http://www.w3.org/2008/05/skos-xl#>
+PREFIX ndl: <http://ndl.go.jp/dcndl/terms/>
+
+SELECT DISTINCT ?s ?name ?label ?birthDate ?deathDate ?transcription
+WHERE {
+  ?s rdf:type foaf:Person;
+     ^foaf:primaryTopic ?ndlna;
+     foaf:name ?name.
+  OPTIONAL { ?s schema:dateOfBirth ?birthDate. }
+  OPTIONAL { ?s schema:dateOfDeath ?deathDate. }
+  OPTIONAL { ?ndlna rdfs:label ?label. }
+  OPTIONAL { 
+    { ?ndlna skosxl:prefLabel ?prefLabel . ?prefLabel ndl:transcription ?transcription . }
+    UNION
+    { ?ndlna skosxl:altLabel ?altLabel . ?altLabel ndl:transcription ?transcription . }
+  }
+  FILTER (
+    regex(?name, "${searchWords[0]}", "i") || 
+    regex(?label, "${searchWords[0]}", "i") ||
+    regex(?transcription, "${searchWords[0]}", "i")
+  )
+}
+LIMIT 50`;
+      }
+      
+      // Multi-word search with AND/OR strategy
+      const wordFilters = searchWords.map(word => 
+        `(regex(?name, "${word}", "i") || regex(?label, "${word}", "i") || regex(?transcription, "${word}", "i"))`
+      );
+      
+      const joinOperator = strategy === 'AND' ? ' && ' : ' || ';
+      const searchFilters = wordFilters.join(joinOperator);
+      
+      return `
+PREFIX foaf: <http://xmlns.com/foaf/0.1/>
+PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+PREFIX schema: <http://schema.org/>
+PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+PREFIX skosxl: <http://www.w3.org/2008/05/skos-xl#>
+PREFIX ndl: <http://ndl.go.jp/dcndl/terms/>
+
+SELECT DISTINCT ?s ?name ?label ?birthDate ?deathDate ?transcription
+WHERE {
+  ?s rdf:type foaf:Person;
+     ^foaf:primaryTopic ?ndlna;
+     foaf:name ?name.
+  OPTIONAL { ?s schema:dateOfBirth ?birthDate. }
+  OPTIONAL { ?s schema:dateOfDeath ?deathDate. }
+  OPTIONAL { ?ndlna rdfs:label ?label. }
+  OPTIONAL { 
+    { ?ndlna skosxl:prefLabel ?prefLabel . ?prefLabel ndl:transcription ?transcription . }
+    UNION
+    { ?ndlna skosxl:altLabel ?altLabel . ?altLabel ndl:transcription ?transcription . }
+  }
+  FILTER (${searchFilters})
+}
+LIMIT 50`;
+    }
+
     function displaySearchResults(ndlBindings, jpSearchBindings) {
       if (ndlBindings.length === 0 && jpSearchBindings.length === 0) {
         authorSearchResults.innerHTML = '<div style="color: #666;">No authors found.</div>';
@@ -727,6 +810,7 @@ LIMIT 20`;
         const authorName = binding.label.value || binding.name.value;
         const birthDate = binding.birthDate ? binding.birthDate.value : null;
         const deathDate = binding.deathDate ? binding.deathDate.value : null;
+        const transcription = binding.transcription ? binding.transcription.value : null;
         
         // Extract base name (remove punctuation and spaces for matching)
         const baseName = normalizeAuthorName(authorName);
@@ -737,6 +821,7 @@ LIMIT 20`;
           baseName: baseName,
           birthDate: birthDate,
           deathDate: deathDate,
+          transcription: transcription,
           hasISBN: false,
           jpSearchId: null
         };
@@ -763,6 +848,7 @@ LIMIT 20`;
             baseName: baseName,
             birthDate: null,
             deathDate: null,
+            transcription: null,
             hasISBN: true,
             jpSearchId: authorId,
             jpSearchName: authorName
@@ -778,6 +864,7 @@ LIMIT 20`;
         if (author.hasISBN) {
           // Prefer ISBN version, use NDL name if available for better formatting
           displayName = author.ndlName || author.jpSearchName || author.baseName;
+          if (author.transcription) displayName += ` / ${author.transcription}`;
           if (author.birthDate) displayName += ` (${author.birthDate})`;
           if (author.deathDate) displayName += ` - ${author.deathDate}`;
           displayName += ' 📚'; // ISBN indicator
@@ -785,6 +872,7 @@ LIMIT 20`;
         } else {
           // No ISBN version available
           displayName = author.ndlName;
+          if (author.transcription) displayName += ` / ${author.transcription}`;
           if (author.birthDate) displayName += ` (${author.birthDate})`;
           if (author.deathDate) displayName += ` - ${author.deathDate}`;
           preferredId = author.ndlId;
