@@ -1,43 +1,285 @@
 <!DOCTYPE html>
 <html>
 <head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Book list</title>
   <style>
-    body { font-family: sans-serif; }
-    table { border-collapse: collapse; width: 100%; }
-    th, td { border: 1px solid #ddd; padding: 8px; white-space: pre-wrap; }
-    th { background-color: #f2f2f2; text-align: left; }
+    * {
+      box-sizing: border-box;
+    }
+    
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+      margin: 0;
+      padding: 16px;
+      line-height: 1.6;
+      color: #333;
+      background-color: #fff;
+    }
+    
+    .container {
+      max-width: 1200px;
+      margin: 0 auto;
+    }
+    
+    h1 {
+      margin-top: 0;
+      margin-bottom: 1.5rem;
+      font-size: 1.75rem;
+    }
+    
+    h2 {
+      margin-top: 2rem;
+      margin-bottom: 1rem;
+      font-size: 1.25rem;
+    }
+    
+    .form-group {
+      margin-bottom: 1rem;
+    }
+    
+    label {
+      display: block;
+      margin-bottom: 0.5rem;
+      font-weight: 500;
+    }
+    
+    select, input[type="text"] {
+      width: 100%;
+      padding: 12px;
+      border: 2px solid #ddd;
+      border-radius: 8px;
+      font-size: 16px;
+      background-color: #fff;
+      transition: border-color 0.2s;
+    }
+    
+    select:focus, input[type="text"]:focus {
+      outline: none;
+      border-color: #007AFF;
+    }
+    
+    .search-container {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+    
+    .search-buttons {
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+    
+    button {
+      padding: 12px 24px;
+      border: none;
+      border-radius: 8px;
+      font-size: 16px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: all 0.2s;
+      flex: 1;
+      min-width: 120px;
+    }
+    
+    #search-author-button {
+      background-color: #007AFF;
+      color: white;
+    }
+    
+    #search-author-button:hover {
+      background-color: #0056CC;
+    }
+    
+    #clear-cache-button {
+      background-color: #FF3B30;
+      color: white;
+    }
+    
+    #clear-cache-button:hover {
+      background-color: #D70015;
+    }
+    
+    button:active {
+      transform: translateY(1px);
+    }
+    
+    .table-container {
+      overflow-x: auto;
+      margin: 1.5rem 0;
+      border-radius: 8px;
+      border: 1px solid #ddd;
+    }
+    
+    table {
+      border-collapse: collapse;
+      width: 100%;
+      min-width: 600px;
+    }
+    
+    th, td {
+      border: 1px solid #ddd;
+      padding: 12px;
+      text-align: left;
+      white-space: pre-wrap;
+      word-wrap: break-word;
+    }
+    
+    th {
+      background-color: #f8f9fa;
+      font-weight: 600;
+      position: sticky;
+      top: 0;
+      z-index: 1;
+    }
+    
+    td {
+      background-color: #fff;
+    }
+    
+    tr:nth-child(even) td {
+      background-color: #f8f9fa;
+    }
+    
+    ul {
+      margin: 0;
+      padding-left: 1.2rem;
+    }
+    
+    li {
+      margin-bottom: 0.25rem;
+    }
+    
+    a {
+      color: #007AFF;
+      text-decoration: none;
+      word-break: break-all;
+    }
+    
+    a:hover {
+      text-decoration: underline;
+    }
+    
+    .error-container {
+      border-radius: 8px;
+      margin-top: 1.5rem;
+    }
+    
+    .search-results {
+      margin-top: 1rem;
+      padding: 1rem;
+      border-radius: 8px;
+      background-color: #f8f9fa;
+    }
+    
+    .loading {
+      text-align: center;
+      padding: 2rem;
+      color: #666;
+    }
+    
+    /* Desktop styles */
+    @media (min-width: 768px) {
+      body {
+        padding: 24px;
+      }
+      
+      .search-container {
+        flex-direction: row;
+        align-items: flex-end;
+      }
+      
+      .search-container input {
+        flex: 1;
+      }
+      
+      .search-buttons {
+        flex-shrink: 0;
+      }
+      
+      button {
+        flex: none;
+        min-width: 140px;
+      }
+      
+      h1 {
+        font-size: 2rem;
+      }
+      
+      h2 {
+        font-size: 1.5rem;
+      }
+    }
+    
+    @media (min-width: 1024px) {
+      body {
+        padding: 32px;
+      }
+      
+      .form-group {
+        max-width: 400px;
+      }
+    }
+    
+    /* High DPI displays */
+    @media (-webkit-min-device-pixel-ratio: 2), (min-resolution: 192dpi) {
+      table {
+        font-size: 14px;
+      }
+      
+      th, td {
+        padding: 10px;
+      }
+    }
   </style>
 </head>
 <body>
-  <h1>Works by Author</h1>
-  <label for="author-select">Select Author:</label>
-  <select id="author-select">
-    <option value="http://id.ndl.go.jp/auth/entity/00026849">Karatani Kojin</option>
-    <option value="http://id.ndl.go.jp/auth/entity/00138697">Chon Kyongmo</option>
-    <option value="http://id.ndl.go.jp/auth/entity/00097630">Yoshimoto Takaaki</option>
-    <option value="http://id.ndl.go.jp/auth/entity/001225192">Ryu Shimin</option>
-    <option value="http://id.ndl.go.jp/auth/entity/00142627">Lee O-Young</option>
-    <option value="http://id.ndl.go.jp/auth/entity/00188634">Kim Yongoak</option>
-  </select>
+  <div class="container">
+    <h1>Works by Author</h1>
+    
+    <div class="form-group">
+      <label for="author-select">Select Author:</label>
+      <select id="author-select">
+        <option value="http://id.ndl.go.jp/auth/entity/00026849">Karatani Kojin</option>
+        <option value="http://id.ndl.go.jp/auth/entity/00138697">Chon Kyongmo</option>
+        <option value="http://id.ndl.go.jp/auth/entity/00097630">Yoshimoto Takaaki</option>
+        <option value="http://id.ndl.go.jp/auth/entity/001225192">Ryu Shimin</option>
+        <option value="http://id.ndl.go.jp/auth/entity/00142627">Lee O-Young</option>
+        <option value="http://id.ndl.go.jp/auth/entity/00188634">Kim Yongoak</option>
+      </select>
+    </div>
 
-  <h2>Search Authors</h2>
-  <label for="author-search-input">Author Name:</label>
-  <input type="text" id="author-search-input" placeholder="Enter author name">
-  <button id="search-author-button">Search</button>
-  <button id="clear-cache-button">Clear Cached Authors</button>
-  <div id="author-search-results"></div>
-  <p>This table displays works by the selected author, based on a live SPARQL query to <a href="https://jpsearch.go.jp/">JPSearch</a>.</p>
-  <table id="results-table">
-    <thead>
-      <tr>
-        <!-- Headers will be populated by JS -->
-      </tr>
-    </thead>
-    <tbody>
-      <tr><td colspan="4">Loading...</td></tr>
-    </tbody>
-  </table>
+    <h2>Search Authors</h2>
+    <div class="search-container">
+      <div class="form-group" style="flex: 1; margin-bottom: 0;">
+        <label for="author-search-input">Author Name:</label>
+        <input type="text" id="author-search-input" placeholder="Enter author name">
+      </div>
+      <div class="search-buttons">
+        <button id="search-author-button">Search</button>
+        <button id="clear-cache-button">Clear Cache</button>
+      </div>
+    </div>
+    
+    <div id="author-search-results" class="search-results" style="display: none;"></div>
+    
+    <p>This table displays works by the selected author, based on a live SPARQL query to <a href="https://jpsearch.go.jp/">JPSearch</a>.</p>
+    
+    <div class="table-container">
+      <table id="results-table">
+        <thead>
+          <tr>
+            <!-- Headers will be populated by JS -->
+          </tr>
+        </thead>
+        <tbody>
+          <tr><td colspan="4" class="loading">Loading...</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
   <div id="error-container" style="display: none; color: red; background-color: #ffebeb; border: 1px solid red; padding: 10px; margin-top: 20px;">
     <h2>JavaScript Error</h2>
     <pre id="error-message"></pre>
@@ -357,7 +599,8 @@ LIMIT 100
 
       const url = `${ndlEndpoint}?query=${encodeURIComponent(sparqlQuery)}&format=json`;
 
-      authorSearchResults.innerHTML = 'Loading...';
+      authorSearchResults.style.display = 'block';
+      authorSearchResults.innerHTML = '<div class="loading">Searching authors...</div>';
 
       fetch(url)
         .then(res => {
@@ -367,12 +610,13 @@ LIMIT 100
           return res.json();
         })
         .then(data => {
-          authorSearchResults.innerHTML = '';
           const bindings = data.results && data.results.bindings ? data.results.bindings : [];
           if (bindings.length === 0) {
-            authorSearchResults.innerHTML = 'No authors found.';
+            authorSearchResults.innerHTML = '<div style="color: #666;">No authors found.</div>';
             return;
           }
+          
+          authorSearchResults.innerHTML = '';
 
           const ul = document.createElement('ul');
           bindings.forEach(binding => {
@@ -414,7 +658,7 @@ LIMIT 100
         })
         .catch(e => {
           console.error('Error searching authors:', e);
-          authorSearchResults.innerHTML = `<span style="color: red;">Error searching authors: ${e.message}</span>`;
+          authorSearchResults.innerHTML = `<div style="color: #FF3B30; padding: 1rem; background-color: #ffebeb; border-radius: 8px; border: 1px solid #FF3B30;">Error searching authors: ${e.message}</div>`;
         });
     }
   </script>
