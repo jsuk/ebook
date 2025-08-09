@@ -269,6 +269,8 @@ a:hover {
     
     <p>This table displays works by the selected author, based on live SPARQL queries to <a href="https://jpsearch.go.jp/">JPSearch</a> and <a href="https://lod.nl.go.kr/">Korean National Library</a>.</p>
     
+    <div id="knl-status" style="display: none; padding: 8px; margin: 10px 0; border-radius: 4px; font-size: 0.9em;"></div>
+    
     <div class="table-container">
       <table id="results-table">
         <thead>
@@ -400,6 +402,33 @@ a:hover {
       }
     }
 
+    // Check KNL proxy status on page load
+    async function checkKNLStatus() {
+      try {
+        const response = await fetch('http://localhost:8001/', { 
+          method: 'GET',
+          signal: AbortSignal.timeout(3000) // 3 second timeout
+        });
+        
+        const statusDiv = document.getElementById('knl-status');
+        if (response.ok) {
+          statusDiv.style.display = 'block';
+          statusDiv.style.backgroundColor = '#d4edda';
+          statusDiv.style.color = '#155724';
+          statusDiv.style.border = '1px solid #c3e6cb';
+          statusDiv.innerHTML = '✅ KNL (Korean National Library) search is available';
+        }
+      } catch (error) {
+        const statusDiv = document.getElementById('knl-status');
+        statusDiv.style.display = 'block';
+        statusDiv.style.backgroundColor = '#f8d7da';
+        statusDiv.style.color = '#721c24';
+        statusDiv.style.border = '1px solid #f5c6cb';
+        statusDiv.innerHTML = '⚠️ KNL (Korean National Library) search is unavailable - proxy not running. JPSearch and NDL still work normally.';
+        console.info('KNL proxy not detected - KNL searches will be disabled');
+      }
+    }
+
     // Call this on page load
     loadCachedAuthors().then(() => {
       const lastSelectedAuthor = localStorage.getItem('lastSelectedAuthor');
@@ -407,6 +436,7 @@ a:hover {
         authorSelect.value = lastSelectedAuthor;
       }
       fetchWorks(authorSelect.value);
+      checkKNLStatus(); // Check KNL availability
     });
 
     // Add initial authors to IndexedDB
@@ -547,6 +577,9 @@ LIMIT 50
       return fetch(url)
         .then(res => {
           if (!res.ok) {
+            if (res.status === 0 || res.status >= 500) {
+              throw new Error('KNL proxy not available');
+            }
             throw new Error(`KNL HTTP error! status: ${res.status}`);
           }
           return res.json();
@@ -557,7 +590,11 @@ LIMIT 50
           vars: data.head ? data.head.vars : []
         }))
         .catch(e => {
-          console.error('KNL error:', e);
+          if (e.message.includes('proxy not available')) {
+            console.warn('KNL proxy is not running - KNL work search disabled');
+          } else {
+            console.error('KNL error:', e);
+          }
           return { source: 'KNL', bindings: [], vars: [], error: e.message };
         });
     }
@@ -815,15 +852,33 @@ SELECT ?jpEntity WHERE {
     }
 
     async function searchJPSearchAuthors(name, strategy) {
-      // Direct JPSearch author search (separate from NDL-linked ones)
-      const jpQuery = buildJPSearchQuery(name, strategy);
+      // Enhanced JPSearch author search with global authority identifiers
+      const jpQuery = `
+PREFIX schema: <http://schema.org/>
+PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+PREFIX owl: <http://www.w3.org/2002/07/owl#>
+
+SELECT DISTINCT ?creator ?authorName ?viafId ?wikidataId ?dbpediaId WHERE {
+  ?s schema:creator ?creator ;
+     schema:isbn ?isbn .
+  BIND(REPLACE(STR(?creator), ".*/", "") AS ?authorName)
+  
+  OPTIONAL { ?creator owl:sameAs ?viafUri . FILTER(CONTAINS(STR(?viafUri), "viaf.org")) BIND(?viafUri AS ?viafId) }
+  OPTIONAL { ?creator owl:sameAs ?wikidataUri . FILTER(CONTAINS(STR(?wikidataUri), "wikidata.org")) BIND(?wikidataUri AS ?wikidataId) }  
+  OPTIONAL { ?creator owl:sameAs ?dbpediaUri . FILTER(CONTAINS(STR(?dbpediaUri), "dbpedia.org")) BIND(?dbpediaUri AS ?dbpediaId) }
+  
+  FILTER(CONTAINS(LCASE(?authorName), "${name.toLowerCase()}") || 
+         CONTAINS(LCASE(REPLACE(?authorName, "_", " ")), "${name.toLowerCase()}"))
+}
+LIMIT 20`;
+
       const jpUrl = `${jpsEndpoint}?query=${encodeURIComponent(jpQuery)}&format=json`;
       
       try {
         const jpData = await fetch(jpUrl).then(res => res.ok ? res.json() : null);
         return jpData && jpData.results && jpData.results.bindings ? jpData.results.bindings : [];
       } catch (error) {
-        console.error('Direct JPSearch author search failed:', error);
+        console.error('Enhanced JPSearch author search failed:', error);
         return [];
       }
     }
@@ -872,9 +927,17 @@ SELECT ?jpEntity WHERE {
 PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
 PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
 PREFIX nlon: <http://lod.nl.go.kr/ontology/>
-SELECT DISTINCT ?s ?label WHERE { 
+PREFIX owl: <http://www.w3.org/2002/07/owl#>
+SELECT DISTINCT ?s ?label ?gndId ?bnfId ?dbpediaId ?locId ?ndlId WHERE { 
     ?s rdf:type nlon:Author .
     ?s rdfs:label ?label .
+    
+    OPTIONAL { ?s owl:sameAs ?gndUri . FILTER(CONTAINS(STR(?gndUri), "d-nb.info")) BIND(?gndUri AS ?gndId) }
+    OPTIONAL { ?s owl:sameAs ?bnfUri . FILTER(CONTAINS(STR(?bnfUri), "data.bnf.fr")) BIND(?bnfUri AS ?bnfId) }
+    OPTIONAL { ?s owl:sameAs ?dbpediaUri . FILTER(CONTAINS(STR(?dbpediaUri), "dbpedia.org")) BIND(?dbpediaUri AS ?dbpediaId) }
+    OPTIONAL { ?s owl:sameAs ?locUri . FILTER(CONTAINS(STR(?locUri), "id.loc.gov")) BIND(?locUri AS ?locId) }
+    OPTIONAL { ?s owl:sameAs ?ndlUri . FILTER(CONTAINS(STR(?ndlUri), "id.ndl.go.jp")) BIND(?ndlUri AS ?ndlId) }
+    
     FILTER(${filterCondition})
 }
 LIMIT 20`;
@@ -884,7 +947,15 @@ LIMIT 20`;
         const knlUrl = `http://localhost:8001/?url=${encodeURIComponent(knlDirectUrl)}`;
         
         try {
-          const knlData = await fetch(knlUrl).then(res => res.ok ? res.json() : null);
+          const knlData = await fetch(knlUrl).then(res => {
+            if (!res.ok) {
+              if (res.status === 0 || res.status >= 500) {
+                throw new Error('KNL proxy not available');
+              }
+              throw new Error(`HTTP ${res.status}`);
+            }
+            return res.json();
+          });
           console.log(`KNL Strategy ${i + 1} Response:`, knlData); // Debug logging
           
           if (knlData && knlData.results && knlData.results.bindings && knlData.results.bindings.length > 0) {
@@ -892,8 +963,13 @@ LIMIT 20`;
             return knlData.results.bindings;
           }
         } catch (error) {
-          console.error(`KNL search strategy ${i + 1} failed:`, filterCondition, error);
-          // Continue to next strategy
+          console.warn(`KNL search strategy ${i + 1} failed:`, filterCondition, error.message);
+          if (error.message.includes('proxy not available')) {
+            console.warn('KNL proxy is not running - KNL searches will be disabled');
+            window.lastKNLError = error.message; // Track error state
+            return []; // Stop trying other strategies if proxy is down
+          }
+          // Continue to next strategy for other errors
         }
       }
       
@@ -1060,8 +1136,52 @@ LIMIT 50`;
       summary.style.fontSize = '0.9em';
       summary.style.color = '#666';
       summary.style.marginTop = '10px';
-      summary.textContent = `Found ${ndlBindings.length} from NDL, ${jpSearchBindings.length} from JPSearch, ${knlBindings.length} from KNL`;
+      
+      let summaryText = `Found ${ndlBindings.length} from NDL, ${jpSearchBindings.length} from JPSearch, ${knlBindings.length} from KNL`;
+      
+      // Check if KNL searches failed due to proxy issues
+      const knlProxyDown = knlBindings.length === 0 && window.lastKNLError && window.lastKNLError.includes('proxy not available');
+      if (knlProxyDown) {
+        summaryText += ' (⚠️ KNL unavailable - proxy not running)';
+      }
+      
+      summary.textContent = summaryText;
       authorSearchResults.appendChild(summary);
+      
+      // Show global authority identifier matches
+      if (jpSearchBindings.length > 0 || knlBindings.length > 0) {
+        const globalLinks = extractGlobalAuthorityLinks(jpSearchBindings, knlBindings);
+        if (globalLinks.length > 0) {
+          const globalDiv = document.createElement('div');
+          globalDiv.style.fontSize = '0.85em';
+          globalDiv.style.color = '#0066cc';
+          globalDiv.style.marginTop = '5px';
+          globalDiv.innerHTML = `🌐 Global IDs: ${globalLinks.join(', ')}`;
+          authorSearchResults.appendChild(globalDiv);
+        }
+      }
+    }
+
+    function extractGlobalAuthorityLinks(jpSearchBindings, knlBindings) {
+      const globalIds = new Set();
+      
+      // Extract from JPSearch results
+      jpSearchBindings.forEach(binding => {
+        if (binding.viafId) globalIds.add(`<a href="${binding.viafId.value}" target="_blank">VIAF</a>`);
+        if (binding.wikidataId) globalIds.add(`<a href="${binding.wikidataId.value}" target="_blank">Wikidata</a>`);
+        if (binding.dbpediaId) globalIds.add(`<a href="${binding.dbpediaId.value}" target="_blank">DBpedia</a>`);
+      });
+      
+      // Extract from KNL results  
+      knlBindings.forEach(binding => {
+        if (binding.gndId) globalIds.add(`<a href="${binding.gndId.value}" target="_blank">GND</a>`);
+        if (binding.bnfId) globalIds.add(`<a href="${binding.bnfId.value}" target="_blank">BnF</a>`);
+        if (binding.dbpediaId) globalIds.add(`<a href="${binding.dbpediaId.value}" target="_blank">DBpedia</a>`);
+        if (binding.locId) globalIds.add(`<a href="${binding.locId.value}" target="_blank">LoC</a>`);
+        if (binding.ndlId) globalIds.add(`<a href="${binding.ndlId.value}" target="_blank">NDL</a>`);
+      });
+      
+      return Array.from(globalIds);
     }
 
     // Function to merge and deduplicate author results
@@ -1168,12 +1288,14 @@ LIMIT 50`;
           if (author.birthDate) displayName += ` (${author.birthDate})`;
           if (author.deathDate) displayName += ` - ${author.deathDate}`;
           if (author.knlId) displayName += ' 🇰🇷'; // KNL indicator
+          if (author.globalIds && author.globalIds.length > 0) displayName += ' 🌐'; // Global ID indicator
           displayName += ' 📚'; // ISBN indicator
           preferredId = author.jpSearchId;
         } else if (author.knlId && !author.ndlId) {
           // KNL-only author
           displayName = author.knlName;
           displayName += ' 🇰🇷'; // KNL indicator
+          if (author.globalIds && author.globalIds.length > 0) displayName += ' 🌐'; // Global ID indicator
           preferredId = author.knlId;
         } else {
           // NDL-only author
@@ -1192,6 +1314,7 @@ LIMIT 50`;
           if (author.birthDate) displayName += ` (${author.birthDate})`;
           if (author.deathDate) displayName += ` - ${author.deathDate}`;
           if (author.knlId) displayName += ' 🇰🇷'; // KNL indicator
+          if (author.globalIds && author.globalIds.length > 0) displayName += ' 🌐'; // Global ID indicator
           preferredId = author.ndlId;
         }
         
