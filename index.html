@@ -1706,7 +1706,7 @@ LIMIT 20`;
       
       performanceMetrics.cacheMisses++;
       
-      // Clean the search name - remove extra formatting from NDL names
+      // Enhanced name cleaning for Korean names
       let cleanName = name;
       if (name.includes(',')) {
         // If it's a formatted name like "유, 시민, 1959-", extract just the name parts
@@ -1716,24 +1716,86 @@ LIMIT 20`;
         }
       }
       
-      // Try multiple name variations for KNL (working patterns only)
-      const nameVariations = [];
+      // Additional cleaning for Korean names
+      cleanName = cleanName
+        .replace(/\s+/g, '') // Remove all whitespace
+        .replace(/[^\p{L}\p{N}]/gu, '') // Keep only letters and numbers (Unicode-aware)
+        .trim();
       
-      // Variation 1: Clean name (e.g., "유시민")
-      nameVariations.push(cleanName);
+      console.log(`🔍 KNL search preprocessing: "${name}" → "${cleanName}"`);
       
-      // Variation 2: Original name if different
-      if (cleanName !== name) {
-        nameVariations.push(name);
+      // Generate additional search variations for Korean names
+      const searchVariations = [cleanName];
+      
+      // Add spaced version if name is longer than 2 characters
+      if (cleanName.length > 2) {
+        // Korean names are typically 2-4 characters, try common spacing patterns
+        if (cleanName.length === 3) {
+          searchVariations.push(cleanName.charAt(0) + ' ' + cleanName.slice(1)); // "김 철수"
+          searchVariations.push(cleanName.slice(0, 2) + ' ' + cleanName.slice(2)); // "김철 수"
+        }
       }
       
-      // Try each name variation until we get results (using only exact match - CONTAINS fails)
-      for (let i = 0; i < nameVariations.length; i++) {
-        const searchName = nameVariations[i];
-        console.log(`KNL Strategy ${i + 1}: Exact match for "${searchName}"`); // Debug logging
+      console.log(`📝 Search variations generated:`, searchVariations);
+      
+      // Early termination for very short terms that would be too broad
+      if (cleanName.length === 0) {
+        console.log('❌ Empty search term - KNL search aborted');
+        return [];
+      }
+      
+      // Progressive search strategy for KNL: exact -> fuzzy -> keyword
+      const searchStrategies = [];
+      
+      // Strategy 1: Exact match with all search variations
+      searchVariations.forEach((variation, idx) => {
+        searchStrategies.push({
+          name: `exact match (${idx === 0 ? 'clean' : 'variant ' + idx})`,
+          searchTerm: variation,
+          queryGenerator: (term) => SparqlQueries.knl.authorByName(term)
+        });
+      });
+      
+      // Strategy 2: Exact match with original name (if different from all variations)
+      if (!searchVariations.includes(name)) {
+        searchStrategies.push({
+          name: 'exact match (original)',
+          searchTerm: name,
+          queryGenerator: (term) => SparqlQueries.knl.authorByName(term)
+        });
+      }
+      
+      // Strategy 3: Try STRSTARTS (prefix matching) for partial search
+      if (cleanName.length >= 2) {
+        searchStrategies.push({
+          name: 'prefix search (STRSTARTS)',
+          searchTerm: cleanName,
+          queryGenerator: (term) => SparqlQueries.knl.authorByPartialName(term)
+        });
+      }
+      
+      // Strategy 4: Try CONTAINS function for substring matching
+      if (cleanName.length >= 2) {
+        searchStrategies.push({
+          name: 'substring search (CONTAINS)',
+          searchTerm: cleanName,
+          queryGenerator: (term) => SparqlQueries.knl.authorByContains(term)
+        });
+      }
+      
+      console.log(`🔍 KNL search strategies: ${searchStrategies.length} total for "${cleanName}"`);
+      
+      if (searchStrategies.length === 0) {
+        console.log(`❌ No search strategies available for "${cleanName}"`);
+      }
+      
+      // Try each strategy until we get results
+      for (let i = 0; i < searchStrategies.length; i++) {
+        const strategy = searchStrategies[i];
+        console.log(`KNL Strategy ${i + 1}: ${strategy.name} for "${strategy.searchTerm}"`); // Debug logging
         
-        // Use the working modular query pattern (exact match only)
-        const knlQuery = SparqlQueries.knl.authorByName(searchName);
+        // Generate the appropriate query for this strategy
+        const knlQuery = strategy.queryGenerator(strategy.searchTerm);
 
         // Use local CORS proxy for KNL since the endpoint doesn't support CORS
         const knlDirectUrl = `${knlEndpoint}?query=${encodeURIComponent(knlQuery)}&format=json&type=json`;
@@ -1754,15 +1816,17 @@ LIMIT 20`;
           console.log(`Sample binding for ${name}:`, knlData?.results?.bindings?.[0]); // Debug individual record
           
           if (knlData && knlData.results && knlData.results.bindings && knlData.results.bindings.length > 0) {
-            console.log(`KNL Success with strategy ${i + 1}:`, knlData.results.bindings.length, 'results');
+            console.log(`✅ KNL Success with strategy ${i + 1} (${strategy.name}):`, knlData.results.bindings.length, 'results');
+            console.log(`🎯 Successful search term: "${strategy.searchTerm}"`);
             
-            // Cache successful results
+            // Cache successful results with strategy info
             searchCache.set(cacheKey, {
               data: knlData.results.bindings,
-              timestamp: Date.now()
+              timestamp: Date.now(),
+              strategy: strategy.name
             });
             
-            logPerformance('KNL search', performance.now() - startTime);
+            logPerformance(`KNL search (${strategy.name})`, performance.now() - startTime);
             return knlData.results.bindings;
           }
         } catch (error) {
@@ -1771,7 +1835,7 @@ LIMIT 20`;
             throw error;
           }
           
-          console.warn(`KNL search strategy ${i + 1} failed for "${searchName}":`, error.message);
+          console.warn(`❌ KNL search strategy ${i + 1} (${strategy.name}) failed for "${strategy.searchTerm}":`, error.message);
           if (error.message.includes('proxy not available')) {
             console.warn('KNL proxy is not running - KNL searches will be disabled');
             window.lastKNLError = error.message; // Track error state

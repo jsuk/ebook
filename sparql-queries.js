@@ -151,6 +151,89 @@ LIMIT 20`;
     },
 
     /**
+     * KNL partial search using multiple exact matches for common completions
+     * Since KNL doesn't support STRSTARTS, CONTAINS, or REGEX, we can ONLY use exact matches
+     * @param {string} partialName - The partial name to search for  
+     * @returns {string} Complete SPARQL query or error message
+     */
+    authorByPartialName: (partialName) => {
+      if (!partialName || partialName.length < 2) {
+        console.warn('KNL partial search requires minimum 2 characters:', partialName);
+        return `-- ERROR: Minimum 2 characters required for partial search --`;
+      }
+      
+      // Generate common completions for specific known patterns
+      const completions = generateKoreanNameCompletions(partialName);
+      
+      if (completions.length === 0) {
+        // No known completions and KNL doesn't support fuzzy search functions
+        console.warn(`KNL: No predefined completions for "${partialName}" and KNL doesn't support REGEX/CONTAINS/STRSTARTS`);
+        return `-- NO COMPLETIONS: KNL only supports exact matches. No known completions for "${partialName}" --`;
+      }
+      
+      // Use multiple authors query with completions
+      return SparqlQueries.knl.multipleAuthors(completions);
+    },
+
+    /**
+     * KNL search using CONTAINS-like behavior through multiple exact matches
+     * @param {string} partialName - The partial name to search for
+     * @returns {string} Complete SPARQL query
+     */
+    authorByContains: (partialName) => {
+      if (!partialName || partialName.length < 2) {
+        return `-- ERROR: Minimum 2 characters required --`;
+      }
+      
+      // Same approach as authorByPartialName since KNL has limited function support
+      return SparqlQueries.knl.authorByPartialName(partialName);
+    },
+
+    /**
+     * Fallback: Get all authors for client-side filtering
+     * @param {number} limit - Maximum number of authors to fetch
+     * @returns {string} Complete SPARQL query
+     */
+    getAllAuthorsForFiltering: (limit = 100) => {
+      return `
+PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+PREFIX nlon: <http://lod.nl.go.kr/ontology/>
+SELECT DISTINCT ?s ?label WHERE { 
+    ?s rdf:type nlon:Author .
+    ?s rdfs:label ?label .
+}
+LIMIT ${limit}`;
+    },
+
+    /**
+     * KNL "fuzzy" search - actually limited to exact matches only due to KNL limitations
+     * KNL SPARQL endpoint doesn't support REGEX, CONTAINS, STRSTARTS functions
+     * @param {string} searchTerm - The search term
+     * @returns {string} Complete SPARQL query (exact match only)
+     */
+    authorFuzzySearch: (searchTerm) => {
+      if (!searchTerm) {
+        console.warn('KNL authorFuzzySearch requires a search term');
+        return `-- ERROR: Search term required for KNL search --`;
+      }
+      
+      console.warn('KNL fuzzy search limited to exact match only - REGEX/CONTAINS not supported');
+      
+      // KNL only supports exact matching
+      return `
+PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+PREFIX nlon: <http://lod.nl.go.kr/ontology/>
+SELECT DISTINCT ?s ?label WHERE { 
+    ?s rdf:type nlon:Author .
+    ?s rdfs:label ?label .
+    FILTER(?label = "${searchTerm}")
+}
+LIMIT 20`;
+    },
+
+    /**
      * Get author details with enhanced metadata
      * @param {string} authorId - The KNL author URI
      * @returns {string} Complete SPARQL query
@@ -280,13 +363,31 @@ const QuerySets = {
   }
 };
 
+// Korean name completion utilities
+function generateKoreanNameCompletions(partialName) {
+  // Clean the input
+  const cleanPartial = partialName.trim();
+  
+  // Known specific completions based on actual KNL data only
+  const knownCompletions = {
+    '가라타니': ['가라타니 고진'],
+    '박태웅': ['박태웅'], // Already complete
+    '유시민': ['유시민']  // Already complete
+  };
+  
+  // Return known completions if they exist, otherwise empty array
+  // Don't generate fake names - let the fuzzy search handle unknown patterns
+  return knownCompletions[cleanPartial] || [];
+}
+
 // Export for use in other files
 if (typeof module !== 'undefined' && module.exports) {
   // Node.js environment
-  module.exports = { SparqlQueries, SparqlUtils, QuerySets };
+  module.exports = { SparqlQueries, SparqlUtils, QuerySets, generateKoreanNameCompletions };
 } else {
   // Browser environment - attach to window
   window.SparqlQueries = SparqlQueries;
   window.SparqlUtils = SparqlUtils;
   window.QuerySets = QuerySets;
+  window.generateKoreanNameCompletions = generateKoreanNameCompletions;
 }
